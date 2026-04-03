@@ -192,9 +192,9 @@ let execute_plan unix ~input_file ~output_file ~header ~sections
         Elf.section_body input_buf original_symtab_shndx_section
       in
       let original_size = Buf.size original_symtab_shndx_body in
-      for i = 0 to original_size - 1 do
-        Buf.Write.u8 cursor (Bigarray.Array1.get original_symtab_shndx_body i)
-      done
+      Bigarray.Array1.blit original_symtab_shndx_body
+        (Bigarray.Array1.sub cursor.Buf.buffer cursor.Buf.position original_size);
+      Buf.advance cursor original_size
     | None ->
       (* Input doesn't have SYMTAB_SHNDX; write zeros for all original symbols
          (they all have st_shndx < SHN_LORESERVE) *)
