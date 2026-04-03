@@ -235,35 +235,26 @@ let build_symbol_index_map ~original_symbols ~igot_and_iplt strtab =
     (Iplt.entries (Build_igot_and_iplt.iplt igot_and_iplt));
   symbol_to_index, !next_index
 
-(* Build a map from original symbol name to the new synthetic symbol name. For
-   PLT relocations, maps to IPLT symbol; for GOT relocations, maps to IGOT
-   symbol. This handles function sections correctly since we match by symbol
-   name rather than offset. *)
-let build_symbol_rewrite_map ~igot_and_iplt ~relocations =
-  let plt_map = String.Tbl.create 256 in
-  let got_map = String.Tbl.create 256 in
+(* Build maps from original symbol name to synthetic symbol name. Built directly
+   from the deduplicated IGOT/IPLT entry lists, so each unique symbol is visited
+   exactly once regardless of how many callsites reference it. *)
+let build_symbol_rewrite_map ~igot_and_iplt =
+  let iplt_t = Build_igot_and_iplt.iplt igot_and_iplt in
+  let igot_t = Build_igot_and_iplt.igot igot_and_iplt in
+  let plt_map = String.Tbl.create (Iplt.num_entries iplt_t) in
   List.iter
     (fun entry ->
-      match
-        Build_igot_and_iplt.iplt_symbol_for_plt_reloc igot_and_iplt entry
-      with
-      | Some sym ->
-        let orig_sym = Extract_relocations.Relocation_entry.symbol_name entry in
-        if not (String.Tbl.mem plt_map orig_sym)
-        then String.Tbl.add plt_map orig_sym sym
-      | None -> ())
-    (Extract_relocations.convert_to_plt relocations);
+      String.Tbl.add plt_map
+        (Iplt.Entry.original_symbol entry)
+        (Iplt.Entry.iplt_symbol entry))
+    (Iplt.entries iplt_t);
+  let got_map = String.Tbl.create (Igot.num_entries igot_t) in
   List.iter
     (fun entry ->
-      match
-        Build_igot_and_iplt.igot_symbol_for_got_reloc igot_and_iplt entry
-      with
-      | Some sym ->
-        let orig_sym = Extract_relocations.Relocation_entry.symbol_name entry in
-        if not (String.Tbl.mem got_map orig_sym)
-        then String.Tbl.add got_map orig_sym sym
-      | None -> ())
-    (Extract_relocations.convert_to_got relocations);
+      String.Tbl.add got_map
+        (Igot.Entry.original_symbol entry)
+        (Igot.Entry.igot_symbol entry))
+    (Igot.entries igot_t);
   plt_map, got_map
 
 (* Rewrite a single .rela.text* section. Looks up each relocation's target
@@ -403,7 +394,7 @@ let compute ~header ~sections ~symtab_body ~strtab_body ~rela_text_sections
     build_symbol_index_map ~original_symbols ~igot_and_iplt strtab
   in
   let plt_rewrite_map, got_rewrite_map =
-    build_symbol_rewrite_map ~igot_and_iplt ~relocations
+    build_symbol_rewrite_map ~igot_and_iplt
   in
   (* Rewrite all .rela.text* sections *)
   let rewritten_rela_sections =
