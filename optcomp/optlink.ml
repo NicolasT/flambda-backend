@@ -66,7 +66,7 @@ module Make (Backend : Optcomp_intf.Backend) : S = struct
          see which modules it requires. *)
       let info, crc =
         Profile.record_call ~accumulate:true "link/scan/read_cmx" (fun () ->
-            read_unit_info file_name)
+            read_unit_info_for_linking file_name)
       in
       Unit (file_name, info, crc)
     else if Filename.check_suffix file_name Backend.ext_flambda_lib
