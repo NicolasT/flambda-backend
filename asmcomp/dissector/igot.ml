@@ -56,6 +56,7 @@ end
 
 type t =
   { entries : Entry.t list;
+    num_entries : int;
     by_original_symbol : Entry.t String.Tbl.t;
     section_data : bytes
   }
@@ -89,11 +90,14 @@ let build ~prefix ~symbols =
         entry)
       unique_symbols
   in
+  let num_entries = List.length entries in
   (* Section data is zero-initialized *)
-  let section_data = Bytes.make (List.length entries * entry_size) '\x00' in
-  { entries; by_original_symbol; section_data }
+  let section_data = Bytes.make (num_entries * entry_size) '\x00' in
+  { entries; num_entries; by_original_symbol; section_data }
 
 let entries t = t.entries
+
+let num_entries t = t.num_entries
 
 let section_data t = t.section_data
 
