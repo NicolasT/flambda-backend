@@ -83,12 +83,11 @@ let write_rela ~cursor ~symbol_to_index ~r_offset ~symbol ~r_type ~r_addend =
   Rela.write_rela_entry ~cursor
     { r_offset = Int64.of_int r_offset; r_sym; r_type; r_addend }
 
-let execute_plan unix ~input_file ~output_file ~header ~sections
+let execute_plan unix ~input_buf ~output_file ~header ~sections
     ~shstrtab_section ~igot_and_iplt ~plan =
   let module Unix = (val unix : Compiler_owee.Unix_intf.S) in
   let module SL = FRP.Section_layout in
   let module L = FRP.Layout in
-  let input_buf = Buf.map_binary (module Unix) input_file in
   let layout = FRP.layout plan in
   let output_buf =
     Buf.map_binary_write
@@ -390,5 +389,5 @@ let rewrite unix ~input_file ~output_file ~partition_kind ~igot_and_iplt
     FRP.compute ~header ~sections ~symtab_body ~strtab_body ~rela_text_sections
       ~partition_kind ~igot_and_iplt ~relocations
   in
-  execute_plan unix ~input_file ~output_file ~header ~sections ~shstrtab_section
+  execute_plan unix ~input_buf ~output_file ~header ~sections ~shstrtab_section
     ~igot_and_iplt ~plan
