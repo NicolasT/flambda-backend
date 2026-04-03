@@ -458,6 +458,14 @@ let mk_no_manual_module_init f =
     Arg.Unit f,
     " Disable manual module initialization (default)" )
 
+let mk_no_link_consistency_check f =
+  ( "-no-link-consistency-check",
+    Arg.Unit f,
+    " Skip CRC validation of module imports at link time.\n\
+    \    Only safe when all .cmx files are known to be mutually consistent,\n\
+    \    e.g. in a trusted single-source-tree build.  Analogous to the\n\
+    \    ~check_imports:false flag in Dynlink." )
+
 let mk_gc_timings f =
   ("-dgc-timings", Arg.Unit f, "Output information about time spent in the GC")
 
@@ -1247,6 +1255,7 @@ module type Oxcaml_options = sig
   val no_dissector_assume_lld_without_64_bit_eh_frames : unit -> unit
   val manual_module_init : unit -> unit
   val no_manual_module_init : unit -> unit
+  val no_link_consistency_check : unit -> unit
   val gc_timings : unit -> unit
   val no_mach_ir : unit -> unit
   val dllvmir : unit -> unit
@@ -1420,6 +1429,7 @@ module Make_oxcaml_options (F : Oxcaml_options) = struct
         F.no_dissector_assume_lld_without_64_bit_eh_frames;
       mk_manual_module_init F.manual_module_init;
       mk_no_manual_module_init F.no_manual_module_init;
+      mk_no_link_consistency_check F.no_link_consistency_check;
       mk_gc_timings F.gc_timings;
       mk_no_mach_ir F.no_mach_ir;
       mk_dllvmir F.dllvmir;
@@ -1697,6 +1707,7 @@ module Oxcaml_options_impl = struct
 
   let manual_module_init = set' Oxcaml_flags.manual_module_init
   let no_manual_module_init = clear' Oxcaml_flags.manual_module_init
+  let no_link_consistency_check = set' Oxcaml_flags.no_link_consistency_check
   let gc_timings = set' Oxcaml_flags.gc_timings
   let no_mach_ir () = ()
   let dllvmir () = set' Oxcaml_flags.dump_llvmir ()
@@ -2395,6 +2406,7 @@ module Extra_params = struct
     | "no-manual-module-init" ->
         Oxcaml_flags.manual_module_init := false;
         true
+    | "no-link-consistency-check" -> set' Oxcaml_flags.no_link_consistency_check
     | _ -> false
 end
 

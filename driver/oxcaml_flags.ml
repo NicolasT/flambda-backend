@@ -527,5 +527,11 @@ let dissector_assume_lld_without_64_bit_eh_frames = ref true
 let manual_module_init = ref false
   (* -[no-]manual-module-init *)
 
+let no_link_consistency_check = ref false
+  (* -no-link-consistency-check: skip CRC validation of module imports at link
+     time.  Entries are still registered for use by natdynlink.  Only safe
+     when all .cmx files are known to be mutually consistent, e.g. in a
+     single-source-tree build. *)
+
 let () =
   if Clflags.is_flambda2 () then set_o2 ()

@@ -98,7 +98,10 @@ let check_cmi_consistency t file_name cmis =
         match info with
         | None -> ()
         | Some (kind, crc) ->
-          Cmi_consistbl.check t.crc_interfaces name kind crc file_name)
+          if !Oxcaml_flags.no_link_consistency_check
+          then
+            Cmi_consistbl.add_unchecked t.crc_interfaces name kind crc file_name
+          else Cmi_consistbl.check t.crc_interfaces name kind crc file_name)
       cmis
   with
   | Cmi_consistbl.Inconsistency
@@ -118,7 +121,11 @@ let check_cmx_consistency t file_name cmxs =
           if CU.Set.mem name t.cmx_required
           then raise (Error (Missing_cmx (file_name, name)))
         | Some crc ->
-          Cmx_consistbl.check t.crc_implementations name () crc file_name)
+          if !Oxcaml_flags.no_link_consistency_check
+          then
+            Cmx_consistbl.add_unchecked t.crc_implementations name () crc
+              file_name
+          else Cmx_consistbl.check t.crc_implementations name () crc file_name)
       cmxs
   with
   | Cmx_consistbl.Inconsistency

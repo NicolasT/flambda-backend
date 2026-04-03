@@ -58,6 +58,10 @@ end) = struct
     with Not_found ->
       Module_name.Tbl.add tbl name (data, crc, source)
 
+  let add_unchecked tbl name data crc source =
+    if not (Module_name.Tbl.mem tbl name) then
+      Module_name.Tbl.add tbl name (data, crc, source)
+
   let check_noadd tbl name data crc source =
     try check_ tbl name data crc source
     with Not_found ->

@@ -45,6 +45,14 @@ end) : sig
              [source] is the name of the file from which the information
              comes from.  This is used for error reporting. *)
 
+  val add_unchecked: t -> Module_name.t -> Data.t -> Digest.t -> filepath -> unit
+        (* Like [check] but never raises [Inconsistency]: if [name] is already
+           present in [tbl] with a different CRC the entry is silently kept as
+           is; if absent, the new entry is recorded.  Use when consistency
+           validation has been opted out of but entries still need to be
+           registered for later extraction (e.g. building the natdynlink
+           globals map). *)
+
   val check_noadd: t -> Module_name.t -> Data.t -> Digest.t -> filepath -> unit
         (* Same as [check], but raise [Not_available] if no CRC was previously
              associated with [name]. *)
