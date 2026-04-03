@@ -209,12 +209,8 @@ let extract unix ~filename =
   finalize (extract_into_accumulator unix ~filename empty_accumulator)
 
 let extract_from_linked_partitions unix linked_partitions =
-  let acc =
-    List.fold_left
-      (fun acc linked ->
-        extract_into_accumulator unix
-          ~filename:(Partition.Linked.linked_object linked)
-          acc)
-      empty_accumulator linked_partitions
-  in
-  finalize acc
+  List.map
+    (fun linked ->
+      let t = extract unix ~filename:(Partition.Linked.linked_object linked) in
+      linked, t)
+    linked_partitions

@@ -62,8 +62,13 @@ val convert_to_got : t -> Relocation_entry.t list
 val extract : (module Compiler_owee.Unix_intf.S) -> filename:string -> t
 
 (** [extract_from_linked_partitions unix linked_partitions] extracts relocations
-    from all the partially-linked object files.
+    from each partially-linked object file independently.
 
-    Returns combined relocation information from all partitions. *)
+    Returns one relocation set per partition, containing only the relocations
+    found within that partition's object file. Keeping these separate allows
+    each partition's IGOT/IPLT to be sized to its actual references rather than
+    the union of all references across the entire program. *)
 val extract_from_linked_partitions :
-  (module Compiler_owee.Unix_intf.S) -> Partition.Linked.t list -> t
+  (module Compiler_owee.Unix_intf.S) ->
+  Partition.Linked.t list ->
+  (Partition.Linked.t * t) list

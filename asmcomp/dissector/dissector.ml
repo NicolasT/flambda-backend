@@ -163,14 +163,25 @@ let run ~(unix : (module Compiler_owee.Unix_intf.S)) ~temp_dir ~ml_objfiles
     with Partial_link.Error err -> raise (Error (Partial_link_error err))
   in
   log "partially linked %d partition(s)" (List.length linked_partitions);
-  let relocations =
+  let per_partition_relocations =
     Extract_relocations.extract_from_linked_partitions unix linked_partitions
   in
-  log "found %d PLT relocations and %d GOT relocations"
-    (List.length (Extract_relocations.convert_to_plt relocations))
-    (List.length (Extract_relocations.convert_to_got relocations));
+  let total_plt =
+    List.fold_left
+      (fun acc (_, r) ->
+        acc + List.length (Extract_relocations.convert_to_plt r))
+      0 per_partition_relocations
+  in
+  let total_got =
+    List.fold_left
+      (fun acc (_, r) ->
+        acc + List.length (Extract_relocations.convert_to_got r))
+      0 per_partition_relocations
+  in
+  log "found %d PLT relocations and %d GOT relocations across all partitions"
+    total_plt total_got;
   List.iter
-    (fun linked ->
+    (fun (linked, relocations) ->
       let kind = Partition.kind (Partition.Linked.partition linked) in
       let prefix = Partition.symbol_prefix kind in
       let igot_and_iplt = Build_igot_and_iplt.build ~prefix relocations in
@@ -183,7 +194,7 @@ let run ~(unix : (module Compiler_owee.Unix_intf.S)) ~temp_dir ~ml_objfiles
       Rewrite_sections.rewrite unix ~input_file ~output_file
         ~partition_kind:kind ~igot_and_iplt ~relocations;
       log "rewrote %s -> %s" input_file output_file)
-    linked_partitions;
+    per_partition_relocations;
   let existing_script = extract_linker_script_from_ccopts !Clflags.all_ccopts in
   (match existing_script with
   | Some path -> log "found existing linker script: %s" path
