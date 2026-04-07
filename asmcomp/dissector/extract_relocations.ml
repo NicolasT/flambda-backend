@@ -35,7 +35,7 @@ let log_verbose = Dissector_log.log_verbose
 module Relocation_entry = struct
   type t =
     { symbol_name : string;
-      offset : int64
+      offset : int
     }
 
   let symbol_name t = t.symbol_name
@@ -87,70 +87,54 @@ let finalize acc =
 let parse_rela_section ~rela_body ~symtab_body ~strtab_body =
   let convert_to_plt = ref [] in
   let convert_to_got = ref [] in
-  Rela.iter_rela_entries ~rela_body ~f:(fun entry ->
+  Rela.iter_rela_entries ~rela_body
+    ~f:(fun ~r_offset ~r_sym ~r_type ~r_addend:_ ->
       (* Check for PC32 relocations to undefined symbols - these are an error *)
-      if Rela.Reloc_type.equal entry.r_type Rela.Reloc_type.pc32
+      if Rela.Reloc_type.equal r_type Rela.Reloc_type.pc32
       then
-        match Rela.read_symbol_shndx ~symtab_body ~sym_index:entry.r_sym with
+        match Rela.read_symbol_shndx ~symtab_body ~sym_index:r_sym with
         | Some shndx when Rela.Section_index.is_undef shndx ->
           let symbol_name =
             match
-              Rela.read_symbol_name ~symtab_body ~strtab_body
-                ~sym_index:entry.r_sym
+              Rela.read_symbol_name ~symtab_body ~strtab_body ~sym_index:r_sym
             with
             | Some name -> name
             | None -> "<unknown>"
           in
           Misc.fatal_errorf
             "Dissector: R_X86_64_PC32 relocation to undefined symbol %s at \
-             offset 0x%Lx. This occurs when code is compiled with -nodynlink. \
+             offset 0x%x. This occurs when code is compiled with -nodynlink. \
              The dissector requires code to be compiled without -nodynlink \
              (i.e., with dynamic linking support enabled)."
-            symbol_name entry.r_offset
+            symbol_name r_offset
         | _ -> ()
       else if
-        Rela.Reloc_type.equal entry.r_type Rela.Reloc_type.plt32
-        || Rela.Reloc_type.equal entry.r_type Rela.Reloc_type.rex_gotpcrelx
+        Rela.Reloc_type.equal r_type Rela.Reloc_type.plt32
+        || Rela.Reloc_type.equal r_type Rela.Reloc_type.rex_gotpcrelx
       then
-        (* Only process relocations for undefined symbols *)
-        match Rela.read_symbol_shndx ~symtab_body ~sym_index:entry.r_sym with
+        (* Use combined lookup: checks shndx and reads name in one pass. Returns
+           None for defined symbols or if name is unavailable. *)
+        match
+          Rela.read_undef_symbol_name ~symtab_body ~strtab_body ~sym_index:r_sym
+        with
         | None ->
           if !Clflags.ddissector_verbose
           then
-            log_verbose "  reloc %s at 0x%Lx: no symbol shndx"
-              (Rela.Reloc_type.name entry.r_type)
-              entry.r_offset
-        | Some shndx when Rela.Section_index.is_defined shndx ->
+            log_verbose "  reloc %s at 0x%x: defined or no symbol name"
+              (Rela.Reloc_type.name r_type)
+              r_offset
+        | Some symbol_name ->
           if !Clflags.ddissector_verbose
           then
-            log_verbose
-              "  reloc %s at 0x%Lx: symbol defined (shndx=%d), skipping"
-              (Rela.Reloc_type.name entry.r_type)
-              entry.r_offset
-              (Rela.Section_index.to_int shndx)
-        | Some _ -> (
-          match
-            Rela.read_symbol_name ~symtab_body ~strtab_body
-              ~sym_index:entry.r_sym
-          with
-          | None ->
-            if !Clflags.ddissector_verbose
-            then
-              log_verbose "  reloc %s at 0x%Lx: no symbol name"
-                (Rela.Reloc_type.name entry.r_type)
-                entry.r_offset
-          | Some symbol_name ->
-            if !Clflags.ddissector_verbose
-            then
-              log_verbose "  reloc %s at 0x%Lx -> %s (UNDEF)"
-                (Rela.Reloc_type.name entry.r_type)
-                entry.r_offset symbol_name;
-            let reloc_entry =
-              { Relocation_entry.symbol_name; offset = entry.r_offset }
-            in
-            if Rela.Reloc_type.equal entry.r_type Rela.Reloc_type.plt32
-            then convert_to_plt := reloc_entry :: !convert_to_plt
-            else convert_to_got := reloc_entry :: !convert_to_got));
+            log_verbose "  reloc %s at 0x%x -> %s (UNDEF)"
+              (Rela.Reloc_type.name r_type)
+              r_offset symbol_name;
+          let reloc_entry =
+            { Relocation_entry.symbol_name; offset = r_offset }
+          in
+          if Rela.Reloc_type.equal r_type Rela.Reloc_type.plt32
+          then convert_to_plt := reloc_entry :: !convert_to_plt
+          else convert_to_got := reloc_entry :: !convert_to_got);
   { convert_to_plt = List.rev !convert_to_plt;
     convert_to_got = List.rev !convert_to_got
   }
@@ -163,9 +147,12 @@ let find_section sections name =
 
 (* Find all sections with names starting with prefix *)
 let find_sections_with_prefix sections prefix =
-  Array.to_list sections
-  |> List.filter (fun (section : Elf.section) ->
-      String.starts_with ~prefix section.sh_name_str)
+  Array.fold_right
+    (fun (section : Elf.section) acc ->
+      if String.starts_with ~prefix section.sh_name_str
+      then section :: acc
+      else acc)
+    sections []
 
 (* Find the symbol table section *)
 let find_symtab_section sections =

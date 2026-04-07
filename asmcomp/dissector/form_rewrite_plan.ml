@@ -303,21 +303,32 @@ let rewrite_rela_section ~rela_body ~plt_index_map ~got_index_map =
   in
   let arr = Array.make n placeholder in
   let i = ref 0 in
-  Rela.iter_rela_entries ~rela_body ~f:(fun entry ->
-      let new_entry =
-        if Rela.Reloc_type.equal entry.r_type Rela.Reloc_type.plt32
+  Rela.iter_rela_entries ~rela_body
+    ~f:(fun ~r_offset ~r_sym ~r_type ~r_addend ->
+      let r_offset = Int64.of_int r_offset in
+      let r_addend = Int64.of_int r_addend in
+      let new_entry : Rela.rela_entry =
+        if Rela.Reloc_type.equal r_type Rela.Reloc_type.plt32
         then
-          match Hashtbl.find_opt plt_index_map entry.r_sym with
+          match Hashtbl.find_opt plt_index_map r_sym with
           | Some new_idx ->
-            { entry with r_sym = new_idx; r_type = Rela.Reloc_type.pc32 }
-          | None -> entry
-        else if Rela.Reloc_type.equal entry.r_type Rela.Reloc_type.rex_gotpcrelx
+            { r_offset;
+              r_sym = new_idx;
+              r_type = Rela.Reloc_type.pc32;
+              r_addend
+            }
+          | None -> { r_offset; r_sym; r_type; r_addend }
+        else if Rela.Reloc_type.equal r_type Rela.Reloc_type.rex_gotpcrelx
         then
-          match Hashtbl.find_opt got_index_map entry.r_sym with
+          match Hashtbl.find_opt got_index_map r_sym with
           | Some new_idx ->
-            { entry with r_sym = new_idx; r_type = Rela.Reloc_type.pc32 }
-          | None -> entry
-        else entry
+            { r_offset;
+              r_sym = new_idx;
+              r_type = Rela.Reloc_type.pc32;
+              r_addend
+            }
+          | None -> { r_offset; r_sym; r_type; r_addend }
+        else { r_offset; r_sym; r_type; r_addend }
       in
       arr.(!i) <- new_entry;
       incr i);

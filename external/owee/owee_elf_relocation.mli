@@ -115,9 +115,17 @@ type rela_entry =
     (** Addend for the relocation. *)
   }
 
-(** [iter_rela_entries ~rela_body ~f] iterates over all RELA entries in
-    the given section body, calling [f] for each entry. *)
-val iter_rela_entries : rela_body:Owee_buf.t -> f:(rela_entry -> unit) -> unit
+(** [iter_rela_entries ~rela_body ~f] iterates over all RELA entries in the
+    given section body, calling [f] for each entry.
+
+    Fields are passed directly without boxing to avoid allocation in the hot
+    path. [r_offset] and [r_sym] are native ints (safe on 64-bit platforms
+    where the dissector runs). [r_addend] is not passed since the dissector
+    never uses it. *)
+val iter_rela_entries :
+  rela_body:Owee_buf.t ->
+  f:(r_offset:int -> r_sym:int -> r_type:Reloc_type.t -> r_addend:int -> unit) ->
+  unit
 
 (** {1 Symbol Name Lookup} *)
 
@@ -135,6 +143,18 @@ val read_symbol_name :
     Use [Section_index.is_undef] to check for undefined symbols. *)
 val read_symbol_shndx :
   symtab_body:Owee_buf.t -> sym_index:int -> Section_index.t option
+
+(** [read_undef_symbol_name ~symtab_body ~strtab_body ~sym_index] reads the
+    name of a symbol only if it is undefined (st_shndx = SHN_UNDEF).
+
+    Combines the shndx check and name lookup in a single symbol entry access.
+    Returns [None] if the symbol is defined, the index is out of bounds, or
+    the name cannot be read. *)
+val read_undef_symbol_name :
+  symtab_body:Owee_buf.t ->
+  strtab_body:Owee_buf.t ->
+  sym_index:int ->
+  string option
 
 (** {1 Entry Sizes} *)
 
