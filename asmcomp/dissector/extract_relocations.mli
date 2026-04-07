@@ -41,7 +41,7 @@ module Relocation_entry : sig
   val symbol_name : t -> string
 
   (** Returns the offset of the relocation within the section. *)
-  val offset : t -> int64
+  val offset : t -> int
 end
 
 (** The result of extracting relocations from object files. *)

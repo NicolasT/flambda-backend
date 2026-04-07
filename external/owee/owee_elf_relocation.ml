@@ -93,26 +93,60 @@ let r_sym_of_info r_info = Int64.to_int r_info lsr 32
 let r_type_of_info r_info = Int64.to_int r_info land 0xFFFFFFFF
 
 let iter_rela_entries ~rela_body ~f =
-  let size = Owee_buf.size rela_body in
-  if size mod rela_entry_size <> 0
+  let n = Owee_buf.size rela_body in
+  if n mod rela_entry_size <> 0
   then
     Owee_buf.invalid_formatf
-      "RELA section size %d is not a multiple of entry size %d" size
+      "RELA section size %d is not a multiple of entry size %d" n
       rela_entry_size;
-  let num_entries = size / rela_entry_size in
-  let cursor = Owee_buf.cursor rela_body in
-  for _ = 0 to num_entries - 1 do
-    let r_offset = Owee_buf.Read.u64 cursor in
-    let r_info = Owee_buf.Read.u64 cursor in
-    let r_addend = Owee_buf.Read.u64 cursor in
-    let entry =
-      { r_offset;
-        r_sym = r_sym_of_info r_info;
-        r_type = r_type_of_info r_info;
-        r_addend
-      }
+  let num_entries = n / rela_entry_size in
+  (* Read fields directly from the bigarray without cursor or int64 boxing.
+     Each RELA entry is 24 bytes: r_offset (0-7), r_info (8-15), r_addend
+     (16-23). All fields in little-endian byte order.
+
+     r_offset is returned as a native int: safe on 64-bit platforms (required
+     by the dissector) since section offsets are well under 2^62.
+
+     r_info is split into r_type (lower 32 bits) and r_sym (upper 32 bits),
+     both returned as native ints. r_addend is not passed to [f] since the
+     dissector never needs it. *)
+  for i = 0 to num_entries - 1 do
+    let p = i * rela_entry_size in
+    let r_offset =
+      Bigarray.Array1.unsafe_get rela_body p
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 1) lsl 8)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 2) lsl 16)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 3) lsl 24)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 4) lsl 32)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 5) lsl 40)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 6) lsl 48)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 7) lsl 56)
     in
-    f entry
+    let r_type =
+      Bigarray.Array1.unsafe_get rela_body (p + 8)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 9) lsl 8)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 10) lsl 16)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 11) lsl 24)
+    in
+    let r_sym =
+      Bigarray.Array1.unsafe_get rela_body (p + 12)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 13) lsl 8)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 14) lsl 16)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 15) lsl 24)
+    in
+    (* r_addend: bytes 16-23 little-endian. Read as native int; addends are
+       small (typically 0 or -4) and fit in 63 bits on 64-bit platforms. *)
+    let r_addend =
+      Bigarray.Array1.unsafe_get rela_body (p + 16)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 17) lsl 8)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 18) lsl 16)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 19) lsl 24)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 20) lsl 32)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 21) lsl 40)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 22) lsl 48)
+      lor (Bigarray.Array1.unsafe_get rela_body (p + 23) lsl 56)
+    in
+    f ~r_offset ~r_sym ~r_type ~r_addend
   done
 
 (* Elf64_Sym layout:
@@ -122,6 +156,37 @@ let iter_rela_entries ~rela_body ~f =
    st_shndx (2 bytes, offset 6)  - section header index
    st_value (8 bytes, offset 8)  - value
    st_size  (8 bytes, offset 16) - size *)
+
+(* Reads the name of a symbol only if it is undefined (st_shndx = SHN_UNDEF).
+   Combines the shndx check and name lookup in a single symbol entry access,
+   avoiding two separate passes over the same symbol entry.
+   Returns [None] if the symbol is defined, the index is out of bounds, or the
+   name cannot be read. *)
+let read_undef_symbol_name ~symtab_body ~strtab_body ~sym_index =
+  let sym_offset = sym_index * sym_entry_size in
+  if sym_offset + sym_entry_size > Owee_buf.size symtab_body
+  then None
+  else
+    (* st_shndx is at offset 6 within the symbol entry, 2 bytes LE *)
+    let shndx =
+      Bigarray.Array1.unsafe_get symtab_body (sym_offset + 6) lor
+      (Bigarray.Array1.unsafe_get symtab_body (sym_offset + 7) lsl 8)
+    in
+    if shndx <> shn_undef
+    then None
+    else
+      (* st_name is at offset 0 within the symbol entry, 4 bytes LE *)
+      let st_name =
+        Bigarray.Array1.unsafe_get symtab_body sym_offset lor
+        (Bigarray.Array1.unsafe_get symtab_body (sym_offset + 1) lsl 8) lor
+        (Bigarray.Array1.unsafe_get symtab_body (sym_offset + 2) lsl 16) lor
+        (Bigarray.Array1.unsafe_get symtab_body (sym_offset + 3) lsl 24)
+      in
+      if st_name >= Owee_buf.size strtab_body
+      then None
+      else
+        let cursor = Owee_buf.cursor strtab_body ~at:st_name in
+        Owee_buf.Read.zero_string cursor ()
 
 let read_symbol_name ~symtab_body ~strtab_body ~sym_index =
   let sym_offset = sym_index * sym_entry_size in
