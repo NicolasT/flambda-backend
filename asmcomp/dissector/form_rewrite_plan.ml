@@ -30,6 +30,7 @@
 module Elf = Compiler_owee.Owee_elf
 module Rela = Compiler_owee.Owee_elf_relocation
 module Strtab = Compiler_owee.Owee_elf_string_table
+module Buf = Compiler_owee.Owee_buf
 module String = Misc.Stdlib.String
 
 let log_verbose = Dissector_log.log_verbose
@@ -112,7 +113,7 @@ end
 module Rewritten_rela_section = struct
   type t =
     { section_offset : int64; (* Original file offset of this section *)
-      entries : Rela.rela_entry list
+      entries : Rela.rela_entry array
     }
 
   let section_offset t = t.section_offset
@@ -214,8 +215,9 @@ let build_symbol_index_map ~original_symbols ~igot_and_iplt strtab =
   Array.iteri
     (fun index sym ->
       let name = Symbol_entry.name sym in
-      if not (String.Tbl.mem symbol_to_index name)
-      then String.Tbl.add symbol_to_index name index;
+      (match String.Tbl.find_opt symbol_to_index name with
+      | None -> String.Tbl.add symbol_to_index name index
+      | Some _ -> ());
       ignore (Strtab.add strtab name))
     original_symbols;
   let next_index = ref (Array.length original_symbols) in
@@ -237,7 +239,8 @@ let build_symbol_index_map ~original_symbols ~igot_and_iplt strtab =
 
 (* Build maps from original symbol name to synthetic symbol name. Built directly
    from the deduplicated IGOT/IPLT entry lists, so each unique symbol is visited
-   exactly once regardless of how many callsites reference it. *)
+   exactly once regardless of how many callsites reference it. Returns
+   string->string maps used by [build_index_rewrite_maps] below. *)
 let build_symbol_rewrite_map ~igot_and_iplt =
   let iplt_t = Build_igot_and_iplt.iplt igot_and_iplt in
   let igot_t = Build_igot_and_iplt.igot igot_and_iplt in
@@ -257,53 +260,68 @@ let build_symbol_rewrite_map ~igot_and_iplt =
     (Igot.entries igot_t);
   plt_map, got_map
 
-(* Rewrite a single .rela.text* section. Looks up each relocation's target
-   symbol and rewrites PLT32/GOTPCRELX relocations to PC32 relocations targeting
-   the synthetic IPLT/IGOT symbols.
+(* Pre-compute direct sym_index -> new_sym_index maps from the string-keyed
+   rewrite maps. One pass over [original_symbols] (O(|symbols|)); all subsequent
+   per-relocation lookups are integer-keyed with no string allocation. *)
+let build_index_rewrite_maps ~original_symbols ~plt_rewrite_map ~got_rewrite_map
+    ~symbol_to_index =
+  let plt_index_map = Hashtbl.create (String.Tbl.length plt_rewrite_map) in
+  let got_index_map = Hashtbl.create (String.Tbl.length got_rewrite_map) in
+  Array.iteri
+    (fun sym_idx sym ->
+      let name = Symbol_entry.name sym in
+      (match String.Tbl.find_opt plt_rewrite_map name with
+      | Some new_sym_name -> (
+        match String.Tbl.find_opt symbol_to_index new_sym_name with
+        | Some new_idx -> Hashtbl.add plt_index_map sym_idx new_idx
+        | None -> ())
+      | None -> ());
+      match String.Tbl.find_opt got_rewrite_map name with
+      | Some new_sym_name -> (
+        match String.Tbl.find_opt symbol_to_index new_sym_name with
+        | Some new_idx -> Hashtbl.add got_index_map sym_idx new_idx
+        | None -> ())
+      | None -> ())
+    original_symbols;
+  plt_index_map, got_index_map
 
-   - PLT32: function calls -> PC32 to IPLT entry - GOTPCRELX: GOT references ->
-   PC32 to IGOT entry *)
-let rewrite_rela_section ~rela_body ~symtab_body ~strtab_body ~symbol_to_index
-    ~plt_rewrite_map ~got_rewrite_map =
-  let entries = ref [] in
+(* Rewrite a single .rela.text* section. Uses pre-computed integer-keyed maps
+   (sym_index -> new_sym_index) so the hot loop performs only integer hashtable
+   lookups with no string allocation.
+
+   The section size is known ahead of time, so we pre-allocate the result array
+   and fill it in one forward pass, avoiding both the reversed-list accumulator
+   and the [List.rev] traversal. *)
+let rewrite_rela_section ~rela_body ~plt_index_map ~got_index_map =
+  let n = Buf.size rela_body / Rela.rela_entry_size in
+  let placeholder : Rela.rela_entry =
+    { r_offset = 0L;
+      r_sym = 0;
+      r_type = Rela.Reloc_type.of_int 0;
+      r_addend = 0L
+    }
+  in
+  let arr = Array.make n placeholder in
+  let i = ref 0 in
   Rela.iter_rela_entries ~rela_body ~f:(fun entry ->
       let new_entry =
-        (* Look up the original symbol name for this relocation *)
-        let sym_name_opt =
-          Rela.read_symbol_name ~symtab_body ~strtab_body ~sym_index:entry.r_sym
-        in
-        match sym_name_opt with
-        | None -> entry
-        | Some sym_name -> (
-          (* Check if this relocation type/symbol should be rewritten *)
-          let rewrite_to =
-            if Rela.Reloc_type.equal entry.r_type Rela.Reloc_type.plt32
-            then String.Tbl.find_opt plt_rewrite_map sym_name
-            else if
-              Rela.Reloc_type.equal entry.r_type Rela.Reloc_type.rex_gotpcrelx
-            then String.Tbl.find_opt got_rewrite_map sym_name
-            else None
-          in
-          match rewrite_to with
-          | Some new_sym_name -> (
-            match String.Tbl.find_opt symbol_to_index new_sym_name with
-            | Some idx ->
-              log_verbose "  rewrite reloc at 0x%Lx: %s %s -> PC32 to %s"
-                entry.r_offset
-                (Rela.Reloc_type.name entry.r_type)
-                sym_name new_sym_name;
-              { entry with r_sym = idx; r_type = Rela.Reloc_type.pc32 }
-            | None ->
-              log_verbose
-                "  rewrite reloc at 0x%Lx: %s -> %s NOT FOUND in symtab"
-                entry.r_offset
-                (Rela.Reloc_type.name entry.r_type)
-                new_sym_name;
-              entry)
-          | None -> entry)
+        if Rela.Reloc_type.equal entry.r_type Rela.Reloc_type.plt32
+        then
+          match Hashtbl.find_opt plt_index_map entry.r_sym with
+          | Some new_idx ->
+            { entry with r_sym = new_idx; r_type = Rela.Reloc_type.pc32 }
+          | None -> entry
+        else if Rela.Reloc_type.equal entry.r_type Rela.Reloc_type.rex_gotpcrelx
+        then
+          match Hashtbl.find_opt got_index_map entry.r_sym with
+          | Some new_idx ->
+            { entry with r_sym = new_idx; r_type = Rela.Reloc_type.pc32 }
+          | None -> entry
+        else entry
       in
-      entries := new_entry :: !entries);
-  List.rev !entries
+      arr.(!i) <- new_entry;
+      incr i);
+  arr
 
 (* Each entry in SYMTAB_SHNDX is 4 bytes (Elf64_Word) *)
 let symtab_shndx_entry_size = 4
@@ -396,14 +414,17 @@ let compute ~header ~sections ~symtab_body ~strtab_body ~rela_text_sections
   let plt_rewrite_map, got_rewrite_map =
     build_symbol_rewrite_map ~igot_and_iplt
   in
+  let plt_index_map, got_index_map =
+    build_index_rewrite_maps ~original_symbols ~plt_rewrite_map ~got_rewrite_map
+      ~symbol_to_index
+  in
   (* Rewrite all .rela.text* sections *)
   let rewritten_rela_sections =
     List.map
       (fun (section, rela_body) ->
         log_verbose "  rewriting section %s" section.Elf.sh_name_str;
         let entries =
-          rewrite_rela_section ~rela_body ~symtab_body ~strtab_body
-            ~symbol_to_index ~plt_rewrite_map ~got_rewrite_map
+          rewrite_rela_section ~rela_body ~plt_index_map ~got_index_map
         in
         { Rewritten_rela_section.section_offset = section.Elf.sh_offset;
           entries

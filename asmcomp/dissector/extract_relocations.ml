@@ -115,27 +115,36 @@ let parse_rela_section ~rela_body ~symtab_body ~strtab_body =
         (* Only process relocations for undefined symbols *)
         match Rela.read_symbol_shndx ~symtab_body ~sym_index:entry.r_sym with
         | None ->
-          log_verbose "  reloc %s at 0x%Lx: no symbol shndx"
-            (Rela.Reloc_type.name entry.r_type)
-            entry.r_offset
+          if !Clflags.ddissector_verbose
+          then
+            log_verbose "  reloc %s at 0x%Lx: no symbol shndx"
+              (Rela.Reloc_type.name entry.r_type)
+              entry.r_offset
         | Some shndx when Rela.Section_index.is_defined shndx ->
-          log_verbose "  reloc %s at 0x%Lx: symbol defined (shndx=%d), skipping"
-            (Rela.Reloc_type.name entry.r_type)
-            entry.r_offset
-            (Rela.Section_index.to_int shndx)
+          if !Clflags.ddissector_verbose
+          then
+            log_verbose
+              "  reloc %s at 0x%Lx: symbol defined (shndx=%d), skipping"
+              (Rela.Reloc_type.name entry.r_type)
+              entry.r_offset
+              (Rela.Section_index.to_int shndx)
         | Some _ -> (
           match
             Rela.read_symbol_name ~symtab_body ~strtab_body
               ~sym_index:entry.r_sym
           with
           | None ->
-            log_verbose "  reloc %s at 0x%Lx: no symbol name"
-              (Rela.Reloc_type.name entry.r_type)
-              entry.r_offset
+            if !Clflags.ddissector_verbose
+            then
+              log_verbose "  reloc %s at 0x%Lx: no symbol name"
+                (Rela.Reloc_type.name entry.r_type)
+                entry.r_offset
           | Some symbol_name ->
-            log_verbose "  reloc %s at 0x%Lx -> %s (UNDEF)"
-              (Rela.Reloc_type.name entry.r_type)
-              entry.r_offset symbol_name;
+            if !Clflags.ddissector_verbose
+            then
+              log_verbose "  reloc %s at 0x%Lx -> %s (UNDEF)"
+                (Rela.Reloc_type.name entry.r_type)
+                entry.r_offset symbol_name;
             let reloc_entry =
               { Relocation_entry.symbol_name; offset = entry.r_offset }
             in
