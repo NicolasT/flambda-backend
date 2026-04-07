@@ -46,23 +46,27 @@ end
 
 (* x86-64 relocation types *)
 module Reloc_type = struct
-  type t = int64
+  (* Using int rather than int64: relocation types are ELF Elf64_Word values
+     (32-bit), so they always fit in an OCaml int.  This avoids boxing. *)
+  type t = int
 
-  let equal = Int64.equal
-  let to_int64 t = t
-  let of_int64 t = t
+  let equal (a : int) (b : int) = a = b
+  let to_int t = t
+  let of_int t = t
+  let to_int64 t = Int64.of_int t
+  let of_int64 t = Int64.to_int t
 
-  let plt32 = 4L
-  let rex_gotpcrelx = 42L
-  let r64 = 1L
-  let pc32 = 2L
+  let plt32 = 4
+  let rex_gotpcrelx = 42
+  let r64 = 1
+  let pc32 = 2
 
   let name t =
-    if Int64.equal t plt32 then "PLT32"
-    else if Int64.equal t rex_gotpcrelx then "REX_GOTPCRELX"
-    else if Int64.equal t pc32 then "PC32"
-    else if Int64.equal t r64 then "64"
-    else Printf.sprintf "type=%Ld" t
+    if t = plt32 then "PLT32"
+    else if t = rex_gotpcrelx then "REX_GOTPCRELX"
+    else if t = pc32 then "PC32"
+    else if t = r64 then "64"
+    else Printf.sprintf "type=%d" t
 end
 
 (* Size of an Elf64_Rela entry in bytes *)
@@ -78,11 +82,15 @@ type rela_entry =
     r_addend : int64
   }
 
-(* Extract symbol index from r_info (upper 32 bits) *)
-let r_sym_of_info r_info = Int64.to_int (Int64.shift_right_logical r_info 32)
+(* Extract symbol index from r_info (upper 32 bits).
+   Uses Int64.to_int + native lsr to avoid allocating an intermediate int64.
+   Safe on 64-bit platforms (required by the dissector) where OCaml int is 63
+   bits so the full 64-bit r_info fits after Int64.to_int. *)
+let r_sym_of_info r_info = Int64.to_int r_info lsr 32
 
-(* Extract relocation type from r_info (lower 32 bits) *)
-let r_type_of_info r_info = Int64.logand r_info 0xFFFFFFFFL
+(* Extract relocation type from r_info (lower 32 bits).
+   Uses Int64.to_int + native land to avoid allocating an intermediate int64. *)
+let r_type_of_info r_info = Int64.to_int r_info land 0xFFFFFFFF
 
 let iter_rela_entries ~rela_body ~f =
   let size = Owee_buf.size rela_body in
@@ -92,9 +100,8 @@ let iter_rela_entries ~rela_body ~f =
       "RELA section size %d is not a multiple of entry size %d" size
       rela_entry_size;
   let num_entries = size / rela_entry_size in
-  for i = 0 to num_entries - 1 do
-    let entry_offset = i * rela_entry_size in
-    let cursor = Owee_buf.cursor rela_body ~at:entry_offset in
+  let cursor = Owee_buf.cursor rela_body in
+  for _ = 0 to num_entries - 1 do
     let r_offset = Owee_buf.Read.u64 cursor in
     let r_info = Owee_buf.Read.u64 cursor in
     let r_addend = Owee_buf.Read.u64 cursor in
@@ -132,16 +139,19 @@ let read_symbol_name ~symtab_body ~strtab_body ~sym_index =
 
 let read_symbol_shndx ~symtab_body ~sym_index =
   let sym_offset = sym_index * sym_entry_size in
-  if sym_offset >= Owee_buf.size symtab_body
+  if sym_offset + sym_entry_size > Owee_buf.size symtab_body
   then None
   else
-    (* st_shndx is at offset 6 within the symbol entry *)
-    let cursor = Owee_buf.cursor symtab_body ~at:(sym_offset + 6) in
-    Some (Section_index.of_int (Owee_buf.Read.u16 cursor))
+    (* st_shndx is at offset 6 within the symbol entry, 2 bytes little-endian.
+       Read directly from the bigarray to avoid cursor record allocation. *)
+    let p = sym_offset + 6 in
+    Some (Section_index.of_int
+      (Bigarray.Array1.unsafe_get symtab_body p lor
+       (Bigarray.Array1.unsafe_get symtab_body (p + 1) lsl 8)))
 
 (* Construct r_info from symbol index and relocation type *)
 let make_r_info ~sym ~typ =
-  Int64.logor (Int64.shift_left (Int64.of_int sym) 32) (Reloc_type.to_int64 typ)
+  Int64.logor (Int64.shift_left (Int64.of_int sym) 32) (Int64.of_int typ)
 
 let write_rela_entry ~cursor entry =
   Owee_buf.Write.u64 cursor entry.r_offset;

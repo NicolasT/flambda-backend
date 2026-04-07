@@ -110,7 +110,7 @@ module Rewritten_rela_section : sig
   val section_offset : t -> int64
 
   (** The rewritten relocation entries. *)
-  val entries : t -> Compiler_owee.Owee_elf_relocation.rela_entry list
+  val entries : t -> Compiler_owee.Owee_elf_relocation.rela_entry array
 end
 
 (** A rewrite plan for an ELF file. *)

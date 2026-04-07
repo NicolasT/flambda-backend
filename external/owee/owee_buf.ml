@@ -93,14 +93,18 @@ module Read = struct
   let u32be = u32
 
   let u64 t : u64 =
-    let result = ref 0L in
-    for i = 0 to 7 do
-      let open Int64 in
-      let n = of_int t.buffer.{t.position + i} in
-      result := logor !result (shift_left n (i * 8))
-    done;
-    advance t 8;
-    !result
+    let b = t.buffer and p = t.position in
+    (* Build lo and hi as unboxed native ints first, then combine into int64.
+       This avoids the ref allocation and eight Int64.of_int calls of the loop
+       version, reducing int64 allocations from 9+ down to 4 per call. *)
+    let lo =
+      b.{p} lor (b.{p+1} lsl 8) lor (b.{p+2} lsl 16) lor (b.{p+3} lsl 24)
+    in
+    let hi =
+      b.{p+4} lor (b.{p+5} lsl 8) lor (b.{p+6} lsl 16) lor (b.{p+7} lsl 24)
+    in
+    t.position <- p + 8;
+    Int64.logor (Int64.of_int lo) (Int64.shift_left (Int64.of_int hi) 32)
 
   let uleb128 t : u128 =
     let rec aux t shift acc =

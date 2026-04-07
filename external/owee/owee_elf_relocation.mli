@@ -71,11 +71,17 @@ module Reloc_type : sig
   val equal : t -> t -> bool
   (** Test equality of relocation types. *)
 
+  val to_int : t -> int
+  (** Convert to the raw ELF relocation type value as a native int. *)
+
+  val of_int : int -> t
+  (** Create from a raw ELF relocation type value as a native int. *)
+
   val to_int64 : t -> int64
-  (** Convert to the raw ELF relocation type value. *)
+  (** Convert to the raw ELF relocation type value as int64. *)
 
   val of_int64 : int64 -> t
-  (** Create from a raw ELF relocation type value. *)
+  (** Create from a raw ELF relocation type value as int64. *)
 
   val plt32 : t
   (** R_X86_64_PLT32 relocation type. *)

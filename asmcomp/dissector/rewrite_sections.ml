@@ -233,7 +233,7 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
             (int64_to_int
                (FRP.Rewritten_rela_section.section_offset rewritten_section))
       in
-      List.iter
+      Array.iter
         (fun e -> Rela.write_rela_entry ~cursor e)
         (FRP.Rewritten_rela_section.entries rewritten_section))
     (FRP.rewritten_rela_sections plan);
