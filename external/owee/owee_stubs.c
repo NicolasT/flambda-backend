@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #include <caml/version.h>
 #if OCAML_VERSION >= 41200
@@ -109,6 +110,30 @@ CAMLprim value owee_blit_bytes_bigstring_stub(
   unsigned char *str = Bytes_val(v_str) + Long_val(v_src_pos);
   char *bstr = get_bstr(v_bstr, v_dst_pos);
   memcpy(bstr, str, Long_val(v_len));
+  return Val_unit;
+}
+
+/* Eagerly unmap a memory-mapped buffer.  Must not be called while any
+   sub-array derived from this buffer (or from the same root mapping) is
+   still being accessed.  Safe to call on non-mmap'd bigarrays (no-op). */
+CAMLprim value owee_buf_unmap(value v)
+{
+  struct caml_ba_array *ba = Caml_ba_array_val(v);
+  void *addr;
+  uintnat size;
+  if ((ba->flags & CAML_BA_MANAGED_MASK) != CAML_BA_MAPPED_FILE)
+    return Val_unit;
+  if (ba->proxy == NULL) {
+    addr = ba->data;
+    size = (uintnat)ba->dim[0]; /* dim[0] = bytes for int8_unsigned arrays */
+    ba->dim[0] = 0;             /* prevent double-unmap in GC finalizer */
+  } else {
+    struct caml_ba_proxy *proxy = ba->proxy;
+    addr = proxy->data;
+    size = proxy->size;
+    proxy->size = 0;            /* prevent double-unmap in all sub-array finalizers */
+  }
+  if (size > 0) munmap(addr, size);
   return Val_unit;
 }
 

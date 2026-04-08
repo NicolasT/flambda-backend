@@ -355,7 +355,8 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
       e_shnum = num_sections
     }
   in
-  Elf.write_elf output_buf new_header new_sections
+  Elf.write_elf output_buf new_header new_sections;
+  Buf.unmap output_buf
 
 (* Find all sections with names starting with prefix *)
 let find_sections_with_prefix sections prefix =
@@ -397,4 +398,5 @@ let rewrite unix ~input_file ~output_file ~partition_kind ~igot_and_iplt
       ~partition_kind ~igot_and_iplt ~relocations
   in
   execute_plan unix ~input_buf ~output_file ~header ~sections ~shstrtab_section
-    ~igot_and_iplt ~symtab_body ~strtab_body ~plan
+    ~igot_and_iplt ~symtab_body ~strtab_body ~plan;
+  Buf.unmap input_buf

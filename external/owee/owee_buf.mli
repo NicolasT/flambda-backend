@@ -6,6 +6,11 @@ type t =
 val map_binary : (module Unix_intf.S) -> string -> t
 val map_binary_write : (module Unix_intf.S) -> string -> int -> t
 
+(** Eagerly unmap a memory-mapped buffer. The caller must ensure that [t] and
+    all sub-arrays derived from it are not accessed after this call. No-op for
+    non-mmap'd buffers. *)
+val unmap : t -> unit
+
 (* Size of buffer remains int, because the size (aka dim) of
    Bigarray.Array1 is int, not int64. It should be enough in practice,
    as we will not be able to manipulate larger binaries anyway. *)

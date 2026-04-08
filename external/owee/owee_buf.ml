@@ -165,6 +165,8 @@ module Read = struct
     result
 end
 
+external unmap : t -> unit = "owee_buf_unmap" [@@noalloc]
+
 external unsafe_blit_str
   :  src:string
   -> src_pos:int
