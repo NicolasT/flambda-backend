@@ -93,7 +93,8 @@ end
 (** A rewrite plan for an ELF file. *)
 type t
 
-(** Returns the number of original symbols from the input file's symbol table. *)
+(** Returns the number of original symbols from the input file's symbol table.
+*)
 val num_original_symbols : t -> int
 
 (** Returns precomputed st_name offsets in the output strtab for IGOT synthetic
@@ -108,12 +109,12 @@ val iplt_st_names : t -> int array
     strtab. Contains null-terminated names for all synthetic symbols. *)
 val synthetic_strtab_data : t -> bytes
 
-(** Returns the output symtab index of the original symbol for IGOT entry [i].
-    0 means the symbol was not found in the input symtab. *)
+(** Returns the output symtab index of the original symbol for IGOT entry [i]. 0
+    means the symbol was not found in the input symtab. *)
 val igot_orig_sym_indices : t -> int array
 
-(** Returns the output symtab index of the IGOT synthetic symbol for IPLT
-    entry [j]. *)
+(** Returns the output symtab index of the IGOT synthetic symbol for IPLT entry
+    [j]. *)
 val iplt_igot_sym_indices : t -> int array
 
 (** Returns the total number of symbols in the output symbol table. *)
@@ -183,6 +184,9 @@ val new_symtab_shndx_idx : t -> int option
 (** Returns the name offset in shstrtab for a new SYMTAB_SHNDX section. *)
 val symtab_shndx_name_offset : t -> int option
 
+(** Returns the file offset of the end of the original section data. *)
+val original_data_end : t -> int64
+
 (** Returns the layout of all sections in the output file. *)
 val layout : t -> Layout.t
 
@@ -205,5 +209,4 @@ val compute :
     (Compiler_owee.Owee_elf.section * Compiler_owee.Owee_buf.t) list ->
   partition_kind:Partition.kind ->
   igot_and_iplt:Build_igot_and_iplt.t ->
-  relocations:Extract_relocations.t ->
   t

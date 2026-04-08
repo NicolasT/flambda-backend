@@ -95,7 +95,9 @@ let build ~prefix ~symbols =
       (fun sym ->
         if String.Tbl.mem seen sym
         then false
-        else (String.Tbl.add seen sym (); true))
+        else (
+          String.Tbl.add seen sym ();
+          true))
       symbols
   in
   let entries =

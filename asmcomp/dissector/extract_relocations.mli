@@ -66,4 +66,3 @@ val num_got : t -> int
 
     Returns the lists of PLT32 and REX_GOTPCRELX relocations found. *)
 val extract : (module Compiler_owee.Unix_intf.S) -> filename:string -> t
-

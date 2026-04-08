@@ -58,7 +58,8 @@ let num_plt t = t.num_plt
 
 let num_got t = t.num_got
 
-let empty = { convert_to_plt = []; convert_to_got = []; num_plt = 0; num_got = 0 }
+let empty =
+  { convert_to_plt = []; convert_to_got = []; num_plt = 0; num_got = 0 }
 
 (* Accumulator for efficient merging - stores lists in reverse order *)
 type accumulator =
@@ -148,8 +149,12 @@ let parse_rela_section ~rela_body ~symtab_body ~strtab_body =
             { Relocation_entry.symbol_name; offset = r_offset }
           in
           if Rela.Reloc_type.equal r_type Rela.Reloc_type.plt32
-          then (convert_to_plt := reloc_entry :: !convert_to_plt; incr num_plt)
-          else (convert_to_got := reloc_entry :: !convert_to_got; incr num_got));
+          then (
+            convert_to_plt := reloc_entry :: !convert_to_plt;
+            incr num_plt)
+          else (
+            convert_to_got := reloc_entry :: !convert_to_got;
+            incr num_got));
   { convert_to_plt = List.rev !convert_to_plt;
     convert_to_got = List.rev !convert_to_got;
     num_plt = !num_plt;

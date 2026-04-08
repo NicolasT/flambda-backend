@@ -63,27 +63,27 @@ type t =
 let igot_symbol_name ~prefix ~symbol =
   "igot" ^ delimiter ^ prefix ^ delimiter ^ symbol
 
-let build ~prefix ~symbols =
-  (* Remove duplicates while preserving order *)
+let build ~prefix ~plt_symbols ~got_only_symbols =
+  (* Iterate plt_symbols then got_only_symbols, deduplicating across both.
+     Avoids allocating a concatenated input list. *)
   let seen = String.Tbl.create 256 in
-  let unique_symbols =
-    List.filter
-      (fun sym ->
-        if String.Tbl.mem seen sym
-        then false
-        else (String.Tbl.add seen sym (); true))
-      symbols
+  let index = ref 0 in
+  let acc = ref [] in
+  let add original_symbol =
+    if not (String.Tbl.mem seen original_symbol)
+    then begin
+      String.Tbl.add seen original_symbol ();
+      let i = !index in
+      incr index;
+      let igot_symbol = igot_symbol_name ~prefix ~symbol:original_symbol in
+      log_verbose "  IGOT entry %d: %s -> %s" i original_symbol igot_symbol;
+      acc := { Entry.index = i; original_symbol; igot_symbol } :: !acc
+    end
   in
-  let entries =
-    List.mapi
-      (fun index original_symbol ->
-        let igot_symbol = igot_symbol_name ~prefix ~symbol:original_symbol in
-        log_verbose "  IGOT entry %d: %s -> %s" index original_symbol
-          igot_symbol;
-        { Entry.index; original_symbol; igot_symbol })
-      unique_symbols
-  in
-  let num_entries = List.length entries in
+  List.iter add plt_symbols;
+  List.iter add got_only_symbols;
+  let entries = List.rev !acc in
+  let num_entries = !index in
   (* Section data is zero-initialized *)
   let section_data = Bytes.make (num_entries * entry_size) '\x00' in
   { entries; num_entries; section_data }
@@ -95,4 +95,3 @@ let num_entries t = t.num_entries
 let section_data t = t.section_data
 
 let section_size t = Bytes.length t.section_data
-

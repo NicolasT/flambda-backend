@@ -170,7 +170,7 @@ let run ~(unix : (module Compiler_owee.Unix_intf.S)) ~temp_dir ~ml_objfiles
   (* Extract relocations and rewrite each partition immediately, so each
      partition's Extract_relocations.t is freed before the next begins rather
      than accumulating all of them simultaneously. *)
-  let (total_plt, total_got) =
+  let total_plt, total_got =
     List.fold_left
       (fun (plt_acc, got_acc) linked ->
         let kind = Partition.kind (Partition.Linked.partition linked) in
@@ -190,9 +190,9 @@ let run ~(unix : (module Compiler_owee.Unix_intf.S)) ~temp_dir ~ml_objfiles
         let output_file = input_file ^ ".rewritten" in
         Profile.record_call ~accumulate:true "dissector/rewrite" (fun () ->
             Rewrite_sections.rewrite unix ~input_file ~output_file
-              ~partition_kind:kind ~igot_and_iplt ~relocations);
+              ~partition_kind:kind ~igot_and_iplt);
         log "rewrote %s -> %s" input_file output_file;
-        (plt_acc + n_plt, got_acc + n_got))
+        plt_acc + n_plt, got_acc + n_got)
       (0, 0) linked_partitions
   in
   log "found %d PLT relocations and %d GOT relocations across all partitions"

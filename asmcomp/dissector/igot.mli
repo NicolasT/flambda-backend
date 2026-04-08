@@ -57,12 +57,15 @@ end
 (** A built intermediate GOT section. *)
 type t
 
-(** [build ~prefix symbols] builds an intermediate GOT from a list of symbols
-    that need GOT entries.
+(** [build ~prefix ~plt_symbols ~got_only_symbols] builds an intermediate GOT
+    from PLT symbols (which need both GOT and PLT entries) and GOT-only symbols.
+    Entries are deduplicated across both lists.
 
     @param prefix A unique prefix for this partition (e.g., "0", "1")
-    @param symbols List of original symbol names needing GOT entries *)
-val build : prefix:string -> symbols:string list -> t
+    @param plt_symbols Symbols needing PLT entries (also need GOT entries)
+    @param got_only_symbols Symbols needing only GOT entries *)
+val build :
+  prefix:string -> plt_symbols:string list -> got_only_symbols:string list -> t
 
 (** Returns the list of entries in the IGOT. *)
 val entries : t -> Entry.t list

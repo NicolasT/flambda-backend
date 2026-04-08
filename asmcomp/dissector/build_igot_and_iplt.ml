@@ -48,7 +48,7 @@ let build ~prefix relocations =
       (Extract_relocations.convert_to_got relocations)
   in
   (* IGOT needs entries for both PLT symbols (PLT jumps through GOT) and
-     GOT-only symbols. Combine the lists - Igot.build will deduplicate. *)
-  let igot = Igot.build ~prefix ~symbols:(plt_syms @ got_only_symbols) in
+     GOT-only symbols. Pass both lists separately to avoid concatenation. *)
+  let igot = Igot.build ~prefix ~plt_symbols:plt_syms ~got_only_symbols in
   let iplt = Iplt.build ~prefix ~symbols:plt_syms in
   { igot; iplt }
