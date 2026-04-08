@@ -54,6 +54,12 @@ val convert_to_plt : t -> Relocation_entry.t list
 *)
 val convert_to_got : t -> Relocation_entry.t list
 
+(** Returns the number of PLT relocations (O(1)). *)
+val num_plt : t -> int
+
+(** Returns the number of GOT relocations (O(1)). *)
+val num_got : t -> int
+
 (** [extract unix ~filename] reads the ELF object file at [filename] and
     extracts relocations from the .rela.text section that need to be converted
     for the medium code model.
@@ -61,14 +67,3 @@ val convert_to_got : t -> Relocation_entry.t list
     Returns the lists of PLT32 and REX_GOTPCRELX relocations found. *)
 val extract : (module Compiler_owee.Unix_intf.S) -> filename:string -> t
 
-(** [extract_from_linked_partitions unix linked_partitions] extracts relocations
-    from each partially-linked object file independently.
-
-    Returns one relocation set per partition, containing only the relocations
-    found within that partition's object file. Keeping these separate allows
-    each partition's IGOT/IPLT to be sized to its actual references rather than
-    the union of all references across the entire program. *)
-val extract_from_linked_partitions :
-  (module Compiler_owee.Unix_intf.S) ->
-  Partition.Linked.t list ->
-  (Partition.Linked.t * t) list

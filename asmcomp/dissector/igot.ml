@@ -57,7 +57,6 @@ end
 type t =
   { entries : Entry.t list;
     num_entries : int;
-    by_original_symbol : Entry.t String.Tbl.t;
     section_data : bytes
   }
 
@@ -65,18 +64,14 @@ let igot_symbol_name ~prefix ~symbol =
   "igot" ^ delimiter ^ prefix ^ delimiter ^ symbol
 
 let build ~prefix ~symbols =
-  (* Remove duplicates while preserving order, and build lookup table *)
-  let by_original_symbol = String.Tbl.create 256 in
+  (* Remove duplicates while preserving order *)
+  let seen = String.Tbl.create 256 in
   let unique_symbols =
     List.filter
       (fun sym ->
-        if String.Tbl.mem by_original_symbol sym
+        if String.Tbl.mem seen sym
         then false
-        else (
-          (* Placeholder entry - will be replaced below *)
-          String.Tbl.add by_original_symbol sym
-            { Entry.index = 0; original_symbol = sym; igot_symbol = "" };
-          true))
+        else (String.Tbl.add seen sym (); true))
       symbols
   in
   let entries =
@@ -85,15 +80,13 @@ let build ~prefix ~symbols =
         let igot_symbol = igot_symbol_name ~prefix ~symbol:original_symbol in
         log_verbose "  IGOT entry %d: %s -> %s" index original_symbol
           igot_symbol;
-        let entry = { Entry.index; original_symbol; igot_symbol } in
-        String.Tbl.replace by_original_symbol original_symbol entry;
-        entry)
+        { Entry.index; original_symbol; igot_symbol })
       unique_symbols
   in
   let num_entries = List.length entries in
   (* Section data is zero-initialized *)
   let section_data = Bytes.make (num_entries * entry_size) '\x00' in
-  { entries; num_entries; by_original_symbol; section_data }
+  { entries; num_entries; section_data }
 
 let entries t = t.entries
 
@@ -103,28 +96,3 @@ let section_data t = t.section_data
 
 let section_size t = Bytes.length t.section_data
 
-let find_entry t ~symbol = String.Tbl.find_opt t.by_original_symbol symbol
-
-module Relocation = struct
-  type t =
-    { offset : int;
-      symbol : string;
-      addend : int64
-    }
-
-  let offset r = r.offset
-
-  let symbol r = r.symbol
-
-  let addend r = r.addend
-end
-
-let relocations t =
-  List.map
-    (fun entry ->
-      Relocation.
-        { offset = Entry.offset entry;
-          symbol = Entry.original_symbol entry;
-          addend = 0L
-        })
-    t.entries

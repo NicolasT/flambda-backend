@@ -105,14 +105,14 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
   in
   let igot_orig_sym_indices = FRP.igot_orig_sym_indices plan in
   List.iteri
-    (fun i r ->
+    (fun i entry ->
       Rela.write_rela_entry ~cursor
-        { r_offset = Int64.of_int (Igot.Relocation.offset r);
+        { r_offset = Int64.of_int (Igot.Entry.offset entry);
           r_sym = igot_orig_sym_indices.(i);
           r_type = Rela.Reloc_type.r64;
-          r_addend = Igot.Relocation.addend r
+          r_addend = 0L
         })
-    (Igot.relocations igot);
+    (Igot.entries igot);
   Buf.Write.fixed_bytes
     (Buf.cursor output_buf ~at:(int64_to_int (SL.offset iplt_layout)))
     (int64_to_int (SL.size iplt_layout))
@@ -122,14 +122,16 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
   in
   let iplt_igot_sym_indices = FRP.iplt_igot_sym_indices plan in
   List.iteri
-    (fun j r ->
+    (fun j entry ->
       Rela.write_rela_entry ~cursor
-        { r_offset = Int64.of_int (Iplt.Relocation.offset r);
+        { r_offset =
+            Int64.of_int
+              (Iplt.Entry.offset entry + Iplt.displacement_offset);
           r_sym = iplt_igot_sym_indices.(j);
           r_type = Rela.Reloc_type.pc32;
-          r_addend = Iplt.Relocation.addend r
+          r_addend = -4L
         })
-    (Iplt.relocations iplt);
+    (Iplt.entries iplt);
   let cursor =
     Buf.cursor output_buf ~at:(int64_to_int (SL.offset symtab_layout))
   in

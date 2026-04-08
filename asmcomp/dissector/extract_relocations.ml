@@ -45,33 +45,46 @@ end
 
 type t =
   { convert_to_plt : Relocation_entry.t list;
-    convert_to_got : Relocation_entry.t list
+    convert_to_got : Relocation_entry.t list;
+    num_plt : int;
+    num_got : int
   }
 
 let convert_to_plt t = t.convert_to_plt
 
 let convert_to_got t = t.convert_to_got
 
-let empty = { convert_to_plt = []; convert_to_got = [] }
+let num_plt t = t.num_plt
+
+let num_got t = t.num_got
+
+let empty = { convert_to_plt = []; convert_to_got = []; num_plt = 0; num_got = 0 }
 
 (* Accumulator for efficient merging - stores lists in reverse order *)
 type accumulator =
   { acc_plt : Relocation_entry.t list;
-    acc_got : Relocation_entry.t list
+    acc_got : Relocation_entry.t list;
+    acc_num_plt : int;
+    acc_num_got : int
   }
 
-let empty_accumulator = { acc_plt = []; acc_got = [] }
+let empty_accumulator =
+  { acc_plt = []; acc_got = []; acc_num_plt = 0; acc_num_got = 0 }
 
 (* Add entries to accumulator - O(n) where n is size of entries being added *)
 let accumulate acc entries =
   { acc_plt = List.rev_append entries.convert_to_plt acc.acc_plt;
-    acc_got = List.rev_append entries.convert_to_got acc.acc_got
+    acc_got = List.rev_append entries.convert_to_got acc.acc_got;
+    acc_num_plt = acc.acc_num_plt + entries.num_plt;
+    acc_num_got = acc.acc_num_got + entries.num_got
   }
 
 (* Finalize accumulator into result - reverses the lists *)
 let finalize acc =
   { convert_to_plt = List.rev acc.acc_plt;
-    convert_to_got = List.rev acc.acc_got
+    convert_to_got = List.rev acc.acc_got;
+    num_plt = acc.acc_num_plt;
+    num_got = acc.acc_num_got
   }
 
 (* Parse RELA entries and extract PLT32 and REX_GOTPCRELX relocations for
@@ -87,6 +100,8 @@ let finalize acc =
 let parse_rela_section ~rela_body ~symtab_body ~strtab_body =
   let convert_to_plt = ref [] in
   let convert_to_got = ref [] in
+  let num_plt = ref 0 in
+  let num_got = ref 0 in
   Rela.iter_rela_entries ~rela_body
     ~f:(fun ~r_offset ~r_sym ~r_type ~r_addend:_ ->
       (* Check for PC32 relocations to undefined symbols - these are an error *)
@@ -133,10 +148,12 @@ let parse_rela_section ~rela_body ~symtab_body ~strtab_body =
             { Relocation_entry.symbol_name; offset = r_offset }
           in
           if Rela.Reloc_type.equal r_type Rela.Reloc_type.plt32
-          then convert_to_plt := reloc_entry :: !convert_to_plt
-          else convert_to_got := reloc_entry :: !convert_to_got);
+          then (convert_to_plt := reloc_entry :: !convert_to_plt; incr num_plt)
+          else (convert_to_got := reloc_entry :: !convert_to_got; incr num_got));
   { convert_to_plt = List.rev !convert_to_plt;
-    convert_to_got = List.rev !convert_to_got
+    convert_to_got = List.rev !convert_to_got;
+    num_plt = !num_plt;
+    num_got = !num_got
   }
 
 (* Find a section by name *)
@@ -207,16 +224,3 @@ let extract_into_accumulator (unix : (module Compiler_owee.Unix_intf.S))
 
 let extract unix ~filename =
   finalize (extract_into_accumulator unix ~filename empty_accumulator)
-
-let extract_from_linked_partitions unix linked_partitions =
-  let acc =
-    List.map
-      (fun linked ->
-        let t =
-          extract unix ~filename:(Partition.Linked.linked_object linked)
-        in
-        linked, t)
-      linked_partitions
-  in
-  Dissector_gc.compact_phase "extract";
-  acc

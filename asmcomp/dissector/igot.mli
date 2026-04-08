@@ -76,28 +76,6 @@ val section_data : t -> bytes
 (** Returns the size of the section in bytes. *)
 val section_size : t -> int
 
-(** [find_entry t ~symbol] returns the entry for [symbol], or [None] if not
-    found. *)
-val find_entry : t -> symbol:string -> Entry.t option
-
 (** [igot_symbol_name ~prefix ~symbol] returns the IGOT symbol name for the
     given original symbol. *)
 val igot_symbol_name : prefix:string -> symbol:string -> string
-
-(** A relocation for an IGOT entry. *)
-module Relocation : sig
-  type t
-
-  (** Returns the offset within the IGOT section. *)
-  val offset : t -> int
-
-  (** Returns the original external symbol to relocate to. *)
-  val symbol : t -> string
-
-  (** Returns the relocation addend (always 0 for IGOT). *)
-  val addend : t -> int64
-end
-
-(** [relocations t] returns the list of R_X86_64_64 relocations needed to fill
-    the IGOT entries with the addresses of the original symbols. *)
-val relocations : t -> Relocation.t list
