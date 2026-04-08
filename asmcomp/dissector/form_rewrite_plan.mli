@@ -33,29 +33,6 @@
     modifications needed: new sections, relocated symbols, and file layout. The
     plan can then be executed by [Rewrite_sections]. *)
 
-(** Information about an original symbol from the ELF symbol table. *)
-module Symbol_entry : sig
-  type t
-
-  (** Returns the symbol name. *)
-  val name : t -> string
-
-  (** Returns st_info (binding and type packed into one byte). *)
-  val st_info : t -> int
-
-  (** Returns st_other (visibility). *)
-  val st_other : t -> int
-
-  (** Returns st_shndx (section index). *)
-  val st_shndx : t -> int
-
-  (** Returns st_value (symbol value/address). *)
-  val st_value : t -> int64
-
-  (** Returns st_size (symbol size). *)
-  val st_size : t -> int64
-end
-
 (** Layout of a section in the output file. *)
 module Section_layout : sig
   type t
@@ -116,11 +93,28 @@ end
 (** A rewrite plan for an ELF file. *)
 type t
 
-(** Returns the original symbols from the input file's symbol table. *)
-val original_symbols : t -> Symbol_entry.t array
+(** Returns the number of original symbols from the input file's symbol table. *)
+val num_original_symbols : t -> int
 
-(** Returns a map from symbol name to index in the output symbol table. *)
-val symbol_to_index : t -> int Misc.Stdlib.String.Tbl.t
+(** Returns precomputed st_name offsets in the output strtab for IGOT synthetic
+    symbols. Index [i] corresponds to IGOT entry [i]. *)
+val igot_st_names : t -> int array
+
+(** Returns precomputed st_name offsets in the output strtab for IPLT synthetic
+    symbols. Index [i] corresponds to IPLT entry [i]. *)
+val iplt_st_names : t -> int array
+
+(** Returns raw bytes to append to the original strtab to form the output
+    strtab. Contains null-terminated names for all synthetic symbols. *)
+val synthetic_strtab_data : t -> bytes
+
+(** Returns the output symtab index of the original symbol for IGOT entry [i].
+    0 means the symbol was not found in the input symtab. *)
+val igot_orig_sym_indices : t -> int array
+
+(** Returns the output symtab index of the IGOT synthetic symbol for IPLT
+    entry [j]. *)
+val iplt_igot_sym_indices : t -> int array
 
 (** Returns the total number of symbols in the output symbol table. *)
 val total_symbols : t -> int
@@ -128,9 +122,6 @@ val total_symbols : t -> int
 (** Returns the list of rewritten .rela.text* sections, each with their original
     file offset and rewritten entries. *)
 val rewritten_rela_sections : t -> Rewritten_rela_section.t list
-
-(** Returns the string table for symbol names. *)
-val strtab : t -> Compiler_owee.Owee_elf_string_table.t
 
 (** Returns the section header string table. *)
 val shstrtab : t -> Compiler_owee.Owee_elf_string_table.t
