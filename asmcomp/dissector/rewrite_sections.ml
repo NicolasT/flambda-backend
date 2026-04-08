@@ -43,20 +43,9 @@ let int64_to_int value =
     Misc.fatal_errorf "Dissector: offset %Ld exceeds platform int range" value
   else Int64.to_int value
 
-let write_symbol ~cursor ~strtab sym =
-  let module SE = FRP.Symbol_entry in
-  Rela.write_sym_entry ~cursor
-    { st_name = Strtab.add strtab (SE.name sym);
-      st_info = SE.st_info sym;
-      st_other = SE.st_other sym;
-      st_shndx = SE.st_shndx sym;
-      st_value = SE.st_value sym;
-      st_size = SE.st_size sym
-    }
-
 (* When section_index >= SHN_LORESERVE, we must use SHN_XINDEX and store the
    actual index in the SYMTAB_SHNDX section. *)
-let write_synthetic_symbol ~cursor ~strtab ~name ~section_index ~offset ~size
+let write_synthetic_symbol ~cursor ~st_name ~section_index ~offset ~size
     ~is_func =
   let section_index' = Rela.Section_index.of_int section_index in
   let st_shndx =
@@ -65,7 +54,7 @@ let write_synthetic_symbol ~cursor ~strtab ~name ~section_index ~offset ~size
     else section_index
   in
   Rela.write_sym_entry ~cursor
-    { st_name = Strtab.add strtab name;
+    { st_name;
       st_info =
         Rela.make_st_info ~binding:Rela.Symbol_binding.global
           ~typ:
@@ -76,15 +65,8 @@ let write_synthetic_symbol ~cursor ~strtab ~name ~section_index ~offset ~size
       st_size = Int64.of_int size
     }
 
-let write_rela ~cursor ~symbol_to_index ~r_offset ~symbol ~r_type ~r_addend =
-  let r_sym =
-    String.Tbl.find_opt symbol_to_index symbol |> Option.value ~default:0
-  in
-  Rela.write_rela_entry ~cursor
-    { r_offset = Int64.of_int r_offset; r_sym; r_type; r_addend }
-
 let execute_plan unix ~input_buf ~output_file ~header ~sections
-    ~shstrtab_section ~igot_and_iplt ~plan =
+    ~shstrtab_section ~igot_and_iplt ~symtab_body ~strtab_body ~plan =
   let module Unix = (val unix : Compiler_owee.Unix_intf.S) in
   let module SL = FRP.Section_layout in
   let module L = FRP.Layout in
@@ -121,11 +103,15 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
   let cursor =
     Buf.cursor output_buf ~at:(int64_to_int (SL.offset rela_igot_layout))
   in
-  List.iter
-    (fun r ->
-      write_rela ~cursor ~symbol_to_index:(FRP.symbol_to_index plan)
-        ~r_offset:(Igot.Relocation.offset r) ~symbol:(Igot.Relocation.symbol r)
-        ~r_type:Rela.Reloc_type.r64 ~r_addend:(Igot.Relocation.addend r))
+  let igot_orig_sym_indices = FRP.igot_orig_sym_indices plan in
+  List.iteri
+    (fun i r ->
+      Rela.write_rela_entry ~cursor
+        { r_offset = Int64.of_int (Igot.Relocation.offset r);
+          r_sym = igot_orig_sym_indices.(i);
+          r_type = Rela.Reloc_type.r64;
+          r_addend = Igot.Relocation.addend r
+        })
     (Igot.relocations igot);
   Buf.Write.fixed_bytes
     (Buf.cursor output_buf ~at:(int64_to_int (SL.offset iplt_layout)))
@@ -134,37 +120,56 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
   let cursor =
     Buf.cursor output_buf ~at:(int64_to_int (SL.offset rela_iplt_layout))
   in
-  List.iter
-    (fun r ->
-      write_rela ~cursor ~symbol_to_index:(FRP.symbol_to_index plan)
-        ~r_offset:(Iplt.Relocation.offset r) ~symbol:(Iplt.Relocation.symbol r)
-        ~r_type:Rela.Reloc_type.pc32 ~r_addend:(Iplt.Relocation.addend r))
+  let iplt_igot_sym_indices = FRP.iplt_igot_sym_indices plan in
+  List.iteri
+    (fun j r ->
+      Rela.write_rela_entry ~cursor
+        { r_offset = Int64.of_int (Iplt.Relocation.offset r);
+          r_sym = iplt_igot_sym_indices.(j);
+          r_type = Rela.Reloc_type.pc32;
+          r_addend = Iplt.Relocation.addend r
+        })
     (Iplt.relocations iplt);
   let cursor =
     Buf.cursor output_buf ~at:(int64_to_int (SL.offset symtab_layout))
   in
-  let plan_strtab = FRP.strtab plan in
-  Array.iter
-    (fun sym -> write_symbol ~cursor ~strtab:plan_strtab sym)
-    (FRP.original_symbols plan);
-  List.iter
-    (fun entry ->
-      write_synthetic_symbol ~cursor ~strtab:plan_strtab
-        ~name:(Igot.Entry.igot_symbol entry)
+  (* Bulk-copy original symbols from input: one blit instead of N per-symbol
+     write_sym_entry calls with record allocations. Since we bulk-copy the
+     original strtab verbatim, all st_name offsets remain valid. *)
+  let num_original = FRP.num_original_symbols plan in
+  let symtab_original_size = num_original * Rela.sym_entry_size in
+  Bigarray.Array1.blit
+    (Bigarray.Array1.sub symtab_body 0 symtab_original_size)
+    (Bigarray.Array1.sub cursor.Buf.buffer cursor.Buf.position
+       symtab_original_size);
+  Buf.advance cursor symtab_original_size;
+  let igot_st_names = FRP.igot_st_names plan in
+  List.iteri
+    (fun i entry ->
+      write_synthetic_symbol ~cursor ~st_name:igot_st_names.(i)
         ~section_index:(FRP.igot_idx plan) ~offset:(Igot.Entry.offset entry)
         ~size:Igot.entry_size ~is_func:false)
     (Igot.entries igot);
-  List.iter
-    (fun entry ->
-      write_synthetic_symbol ~cursor ~strtab:plan_strtab
-        ~name:(Iplt.Entry.iplt_symbol entry)
+  let iplt_st_names = FRP.iplt_st_names plan in
+  List.iteri
+    (fun i entry ->
+      write_synthetic_symbol ~cursor ~st_name:iplt_st_names.(i)
         ~section_index:(FRP.iplt_idx plan) ~offset:(Iplt.Entry.offset entry)
         ~size:Iplt.entry_size ~is_func:true)
     (Iplt.entries iplt);
-  Buf.Write.fixed_bytes
-    (Buf.cursor output_buf ~at:(int64_to_int (SL.offset strtab_layout)))
-    (int64_to_int (SL.size strtab_layout))
-    (Strtab.contents plan_strtab);
+  (* Bulk-copy original strtab, then append synthetic names. *)
+  let strtab_offset = int64_to_int (SL.offset strtab_layout) in
+  let original_strtab_size = Buf.size strtab_body in
+  Bigarray.Array1.blit
+    (Bigarray.Array1.sub strtab_body 0 original_strtab_size)
+    (Bigarray.Array1.sub output_buf strtab_offset original_strtab_size);
+  let synthetic_strtab = FRP.synthetic_strtab_data plan in
+  let synthetic_len = Bytes.length synthetic_strtab in
+  if synthetic_len > 0
+  then
+    Buf.Write.fixed_bytes
+      (Buf.cursor output_buf ~at:(strtab_offset + original_strtab_size))
+      synthetic_len synthetic_strtab;
   (* Write extended SYMTAB_SHNDX section if needed. This section must have the
      same number of entries as the symbol table.
 
@@ -197,10 +202,11 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
     | None ->
       (* Input doesn't have SYMTAB_SHNDX; write zeros for all original symbols
          (they all have st_shndx < SHN_LORESERVE) *)
-      let num_original = Array.length (FRP.original_symbols plan) in
-      for _ = 1 to num_original do
-        write_u32_le cursor 0
-      done);
+      let zero_size = FRP.num_original_symbols plan * 4 in
+      Bigarray.Array1.fill
+        (Bigarray.Array1.sub cursor.Buf.buffer cursor.Buf.position zero_size)
+        0;
+      Buf.advance cursor zero_size);
     (* Write extended section indices for IGOT symbols *)
     let igot_idx = FRP.igot_idx plan in
     let igot_shndx_entry =
@@ -390,4 +396,4 @@ let rewrite unix ~input_file ~output_file ~partition_kind ~igot_and_iplt
       ~partition_kind ~igot_and_iplt ~relocations
   in
   execute_plan unix ~input_buf ~output_file ~header ~sections ~shstrtab_section
-    ~igot_and_iplt ~plan
+    ~igot_and_iplt ~symtab_body ~strtab_body ~plan

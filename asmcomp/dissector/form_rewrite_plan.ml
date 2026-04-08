@@ -40,29 +40,6 @@ let align_up64 value alignment =
   let mask = Int64.sub alignment 1L in
   Int64.logand (Int64.add value mask) (Int64.lognot mask)
 
-module Symbol_entry = struct
-  type t =
-    { name : string;
-      st_info : int;
-      st_other : int;
-      st_shndx : int;
-      st_value : int64;
-      st_size : int64
-    }
-
-  let name s = s.name
-
-  let st_info s = s.st_info
-
-  let st_other s = s.st_other
-
-  let st_shndx s = s.st_shndx
-
-  let st_value s = s.st_value
-
-  let st_size s = s.st_size
-end
-
 module Section_layout = struct
   type t =
     { offset : int64;
@@ -122,11 +99,23 @@ module Rewritten_rela_section = struct
 end
 
 type t =
-  { original_symbols : Symbol_entry.t array;
-    symbol_to_index : int String.Tbl.t;
+  { num_original_symbols : int;
+    (* Pre-computed st_name offsets for synthetic symbols in the output strtab.
+       These are absolute offsets (relative to start of the full output strtab),
+       computed as original_strtab_size + position in synthetic_strtab_data. *)
+    igot_st_names : int array;
+    iplt_st_names : int array;
+    (* Raw bytes to append after the original strtab to form the output
+       strtab *)
+    synthetic_strtab_data : bytes;
+    (* For IGOT RELA writing: igot_orig_sym_indices.(i) is the output symtab
+       index of the original symbol for IGOT entry i (0 = not found). *)
+    igot_orig_sym_indices : int array;
+    (* For IPLT RELA writing: iplt_igot_sym_indices.(j) is the output symtab
+       index of the IGOT synthetic symbol for IPLT entry j. *)
+    iplt_igot_sym_indices : int array;
     total_symbols : int;
     rewritten_rela_sections : Rewritten_rela_section.t list;
-    strtab : Strtab.t;
     shstrtab : Strtab.t;
     section_name_offsets : (int * string) String.Tbl.t;
     igot_name_offset : int;
@@ -144,22 +133,26 @@ type t =
     num_sections : int;
     symtab_idx : int;
     symtab_shndx_idx : int option;
-    (* When we need to create a new SYMTAB_SHNDX section (input doesn't have one
-       but new section indices >= SHN_LORESERVE) *)
     new_symtab_shndx_idx : int option;
     symtab_shndx_name_offset : int option;
     layout : Layout.t
   }
 
-let original_symbols t = t.original_symbols
+let num_original_symbols t = t.num_original_symbols
 
-let symbol_to_index t = t.symbol_to_index
+let igot_st_names t = t.igot_st_names
+
+let iplt_st_names t = t.iplt_st_names
+
+let synthetic_strtab_data t = t.synthetic_strtab_data
+
+let igot_orig_sym_indices t = t.igot_orig_sym_indices
+
+let iplt_igot_sym_indices t = t.iplt_igot_sym_indices
 
 let total_symbols t = t.total_symbols
 
 let rewritten_rela_sections t = t.rewritten_rela_sections
-
-let strtab t = t.strtab
 
 let shstrtab t = t.shstrtab
 
@@ -201,89 +194,183 @@ let symtab_shndx_name_offset t = t.symtab_shndx_name_offset
 
 let layout t = t.layout
 
-let read_symbols ~symtab_body ~strtab_body =
-  let symbols = ref [] in
-  Elf.iter_symbols ~symtab_body ~strtab_body
-    ~f:(fun ~name ~st_info ~st_other ~st_shndx ~st_value ~st_size ->
-      symbols
-        := { Symbol_entry.name; st_info; st_other; st_shndx; st_value; st_size }
-           :: !symbols);
-  Array.of_list (List.rev !symbols)
+(* DJB2a hash of bytes strtab_body[offset..null-terminator). Reads directly from
+   the bigarray without allocating an OCaml string. *)
+let djb2a_strtab strtab_body offset =
+  let n = Buf.size strtab_body in
+  let i = ref offset in
+  let h = ref 5381 in
+  while !i < n && Bigarray.Array1.unsafe_get strtab_body !i <> 0 do
+    h := !h * 33 lxor Bigarray.Array1.unsafe_get strtab_body !i;
+    incr i
+  done;
+  !h
 
-let build_symbol_index_map ~original_symbols ~igot_and_iplt strtab =
-  let symbol_to_index = String.Tbl.create 256 in
-  Array.iteri
-    (fun index sym ->
-      let name = Symbol_entry.name sym in
-      (match String.Tbl.find_opt symbol_to_index name with
-      | None -> String.Tbl.add symbol_to_index name index
-      | Some _ -> ());
-      ignore (Strtab.add strtab name))
-    original_symbols;
-  let next_index = ref (Array.length original_symbols) in
-  List.iter
-    (fun entry ->
-      let igot_sym = Igot.Entry.igot_symbol entry in
-      String.Tbl.add symbol_to_index igot_sym !next_index;
-      ignore (Strtab.add strtab igot_sym);
-      incr next_index)
-    (Igot.entries (Build_igot_and_iplt.igot igot_and_iplt));
-  List.iter
-    (fun entry ->
-      let iplt_sym = Iplt.Entry.iplt_symbol entry in
-      String.Tbl.add symbol_to_index iplt_sym !next_index;
-      ignore (Strtab.add strtab iplt_sym);
-      incr next_index)
-    (Iplt.entries (Build_igot_and_iplt.iplt igot_and_iplt));
-  symbol_to_index, !next_index
+(* DJB2a hash of an OCaml string. Produces the same value as [djb2a_strtab] for
+   identical byte sequences. *)
+let djb2a_string s =
+  let n = String.length s in
+  let h = ref 5381 in
+  for i = 0 to n - 1 do
+    h := !h * 33 lxor Char.code (String.unsafe_get s i)
+  done;
+  !h
 
-(* Build maps from original symbol name to synthetic symbol name. Built directly
-   from the deduplicated IGOT/IPLT entry lists, so each unique symbol is visited
-   exactly once regardless of how many callsites reference it. Returns
-   string->string maps used by [build_index_rewrite_maps] below. *)
-let build_symbol_rewrite_map ~igot_and_iplt =
-  let iplt_t = Build_igot_and_iplt.iplt igot_and_iplt in
-  let igot_t = Build_igot_and_iplt.igot igot_and_iplt in
-  let plt_map = String.Tbl.create (Iplt.num_entries iplt_t) in
-  List.iter
-    (fun entry ->
-      String.Tbl.add plt_map
-        (Iplt.Entry.original_symbol entry)
-        (Iplt.Entry.iplt_symbol entry))
-    (Iplt.entries iplt_t);
-  let got_map = String.Tbl.create (Igot.num_entries igot_t) in
-  List.iter
-    (fun entry ->
-      String.Tbl.add got_map
-        (Igot.Entry.original_symbol entry)
-        (Igot.Entry.igot_symbol entry))
-    (Igot.entries igot_t);
-  plt_map, got_map
+(* True iff strtab_body[offset .. offset+len-1] == str and the next byte is 0.
+   No allocation. Returns false if offset + String.length str >= Buf.size. *)
+let strtab_name_equals strtab_body offset str =
+  let slen = String.length str in
+  if offset + slen >= Buf.size strtab_body
+  then false
+  else begin
+    let i = ref 0 in
+    while
+      !i < slen
+      && Bigarray.Array1.unsafe_get strtab_body (offset + !i)
+         = Char.code (String.unsafe_get str !i)
+    do
+      incr i
+    done;
+    !i = slen && Bigarray.Array1.unsafe_get strtab_body (offset + slen) = 0
+  end
 
-(* Pre-compute direct sym_index -> new_sym_index maps from the string-keyed
-   rewrite maps. One pass over [original_symbols] (O(|symbols|)); all subsequent
-   per-relocation lookups are integer-keyed with no string allocation. *)
-let build_index_rewrite_maps ~original_symbols ~plt_rewrite_map ~got_rewrite_map
-    ~symbol_to_index =
-  let plt_index_map = Hashtbl.create (String.Tbl.length plt_rewrite_map) in
-  let got_index_map = Hashtbl.create (String.Tbl.length got_rewrite_map) in
-  Array.iteri
-    (fun sym_idx sym ->
-      let name = Symbol_entry.name sym in
-      (match String.Tbl.find_opt plt_rewrite_map name with
-      | Some new_sym_name -> (
-        match String.Tbl.find_opt symbol_to_index new_sym_name with
-        | Some new_idx -> Hashtbl.add plt_index_map sym_idx new_idx
-        | None -> ())
-      | None -> ());
-      match String.Tbl.find_opt got_rewrite_map name with
-      | Some new_sym_name -> (
-        match String.Tbl.find_opt symbol_to_index new_sym_name with
-        | Some new_idx -> Hashtbl.add got_index_map sym_idx new_idx
-        | None -> ())
+(* Build all symbol maps needed for rewriting. Returns: - plt_index_map,
+   got_index_map: int→int for rewrite_rela_section hot loop -
+   igot_orig_sym_indices.(i): output symtab index of the original symbol for
+   IGOT entry i (found via symtab scan; 0 = not found) -
+   iplt_igot_sym_indices.(j): output symtab index of the IGOT synthetic symbol
+   for IPLT entry j (= igot_base + igot_entry_idx; precomputed, no scan needed)
+   - igot_st_names, iplt_st_names: absolute st_name offsets for synthetic
+   symbols - synthetic_strtab_data: raw bytes to append to the original strtab
+
+   No OCaml strings are allocated in the symtab scan hot loop: the K IGOT target
+   names are hashed once up-front; each of the N symtab entries is matched by
+   hashing its bytes directly from the strtab bigarray (no string created), with
+   a byte-comparison fallback only on the rare hash-match case. *)
+let build_all_symbol_maps ~symtab_body ~strtab_body ~igot_and_iplt ~num_original
+    =
+  let igot = Build_igot_and_iplt.igot igot_and_iplt in
+  let iplt = Build_igot_and_iplt.iplt igot_and_iplt in
+  let igot_entries = Igot.entries igot in
+  let iplt_entries = Iplt.entries iplt in
+  let num_igot = Igot.num_entries igot in
+  let num_iplt = Iplt.num_entries iplt in
+  let igot_base = num_original in
+  let iplt_base = num_original + num_igot in
+  let original_strtab_size = Buf.size strtab_body in
+  (* Hash table: djb2a(orig_name) -> list of (igot_entry_idx, orig_name_str). A
+     list per bucket handles the rare case of hash collisions. The name strings
+     are shared with IGOT entries — no extra allocation. *)
+  let name_hash_to_igot : (int, (int * string) list) Hashtbl.t =
+    Hashtbl.create (2 * num_igot)
+  in
+  List.iteri
+    (fun i entry ->
+      let orig_name = Igot.Entry.original_symbol entry in
+      let h = djb2a_string orig_name in
+      let existing =
+        Option.value ~default:[] (Hashtbl.find_opt name_hash_to_igot h)
+      in
+      Hashtbl.replace name_hash_to_igot h ((i, orig_name) :: existing))
+    igot_entries;
+  (* Map original name -> IGOT entry index (used to build igot_to_iplt_idx and
+     iplt_igot_sym_indices below; local to this function). *)
+  let orig_name_to_igot_idx : int String.Tbl.t = String.Tbl.create num_igot in
+  List.iteri
+    (fun i entry ->
+      String.Tbl.add orig_name_to_igot_idx (Igot.Entry.original_symbol entry) i)
+    igot_entries;
+  (* For each IGOT entry i: the index of the corresponding IPLT entry, or -1. *)
+  let igot_to_iplt_idx = Array.make num_igot (-1) in
+  List.iteri
+    (fun j entry ->
+      let orig_name = Iplt.Entry.original_symbol entry in
+      match String.Tbl.find_opt orig_name_to_igot_idx orig_name with
+      | Some igot_i ->
+        if igot_to_iplt_idx.(igot_i) = -1 then igot_to_iplt_idx.(igot_i) <- j
       | None -> ())
-    original_symbols;
-  plt_index_map, got_index_map
+    iplt_entries;
+  (* iplt_igot_sym_indices.(j) = output symtab index of the IGOT synthetic
+     symbol for IPLT entry j. Fully determined by the IGOT/IPLT structures — no
+     scan. *)
+  let iplt_igot_sym_indices = Array.make num_iplt 0 in
+  List.iteri
+    (fun j entry ->
+      let orig_name = Iplt.Entry.original_symbol entry in
+      match String.Tbl.find_opt orig_name_to_igot_idx orig_name with
+      | Some igot_i -> iplt_igot_sym_indices.(j) <- igot_base + igot_i
+      | None -> ())
+    iplt_entries;
+  (* igot_orig_sym_indices.(i) = output symtab index of the original symbol for
+     IGOT entry i. Populated during the scan below. 0 = not found. *)
+  let igot_orig_sym_indices = Array.make num_igot 0 in
+  let plt_index_map = Hashtbl.create num_iplt in
+  let got_index_map = Hashtbl.create num_igot in
+  (* Single forward scan of symtab_body. For each symbol, compute the DJB2a hash
+     of its name directly from the strtab bigarray — zero string allocations for
+     the N-K non-matching symbols. Only on a hash match do we byte-compare
+     against the pre-existing IGOT name string (also allocation-free). *)
+  let n = Buf.size symtab_body / Rela.sym_entry_size in
+  for sym_idx = 0 to n - 1 do
+    let p = sym_idx * Rela.sym_entry_size in
+    let st_name =
+      Bigarray.Array1.unsafe_get symtab_body p
+      lor (Bigarray.Array1.unsafe_get symtab_body (p + 1) lsl 8)
+      lor (Bigarray.Array1.unsafe_get symtab_body (p + 2) lsl 16)
+      lor (Bigarray.Array1.unsafe_get symtab_body (p + 3) lsl 24)
+    in
+    if st_name > 0
+    then
+      let h = djb2a_strtab strtab_body st_name in
+      match Hashtbl.find_opt name_hash_to_igot h with
+      | None -> ()
+      | Some candidates ->
+        List.iter
+          (fun (igot_i, orig_name) ->
+            if strtab_name_equals strtab_body st_name orig_name
+            then begin
+              if igot_orig_sym_indices.(igot_i) = 0
+              then igot_orig_sym_indices.(igot_i) <- sym_idx;
+              if not (Hashtbl.mem got_index_map sym_idx)
+              then Hashtbl.add got_index_map sym_idx (igot_base + igot_i);
+              match igot_to_iplt_idx.(igot_i) with
+              | -1 -> ()
+              | iplt_j ->
+                if not (Hashtbl.mem plt_index_map sym_idx)
+                then Hashtbl.add plt_index_map sym_idx (iplt_base + iplt_j)
+            end)
+          candidates
+  done;
+  (* Build synthetic strtab data and precompute absolute st_name offsets. *)
+  let synthetic_buf = Buffer.create 64 in
+  let igot_st_names = Array.make num_igot 0 in
+  List.iteri
+    (fun i entry ->
+      let igot_sym = Igot.Entry.igot_symbol entry in
+      let st_name = original_strtab_size + Buffer.length synthetic_buf in
+      Buffer.add_string synthetic_buf igot_sym;
+      Buffer.add_char synthetic_buf '\x00';
+      igot_st_names.(i) <- st_name)
+    igot_entries;
+  let iplt_st_names = Array.make num_iplt 0 in
+  List.iteri
+    (fun i entry ->
+      let iplt_sym = Iplt.Entry.iplt_symbol entry in
+      let st_name = original_strtab_size + Buffer.length synthetic_buf in
+      Buffer.add_string synthetic_buf iplt_sym;
+      Buffer.add_char synthetic_buf '\x00';
+      iplt_st_names.(i) <- st_name)
+    iplt_entries;
+  let synthetic_strtab_data = Buffer.to_bytes synthetic_buf in
+  let total_symbols = iplt_base + num_iplt in
+  ( plt_index_map,
+    got_index_map,
+    igot_orig_sym_indices,
+    iplt_igot_sym_indices,
+    igot_st_names,
+    iplt_st_names,
+    synthetic_strtab_data,
+    total_symbols )
 
 (* Rewrite a single .rela.text* section. Uses pre-computed integer-keyed maps
    (sym_index -> new_sym_index) so the hot loop performs only integer hashtable
@@ -414,20 +501,19 @@ let rename_section ~(partition_kind : Partition.kind) name =
    sections in the input file. Each section's relocations will be rewritten to
    use the synthetic IGOT/IPLT symbols. *)
 let compute ~header ~sections ~symtab_body ~strtab_body ~rela_text_sections
-    ~partition_kind ~igot_and_iplt ~relocations =
+    ~partition_kind ~igot_and_iplt ~relocations:_ =
   log_verbose "forming rewrite plan for partition %s"
     (Partition.symbol_prefix partition_kind);
-  let original_symbols = read_symbols ~symtab_body ~strtab_body in
-  let strtab = Strtab.create () in
-  let symbol_to_index, total_symbols =
-    build_symbol_index_map ~original_symbols ~igot_and_iplt strtab
-  in
-  let plt_rewrite_map, got_rewrite_map =
-    build_symbol_rewrite_map ~igot_and_iplt
-  in
-  let plt_index_map, got_index_map =
-    build_index_rewrite_maps ~original_symbols ~plt_rewrite_map ~got_rewrite_map
-      ~symbol_to_index
+  let num_original = Buf.size symtab_body / Rela.sym_entry_size in
+  let ( plt_index_map,
+        got_index_map,
+        igot_orig_sym_indices,
+        iplt_igot_sym_indices,
+        igot_st_names,
+        iplt_st_names,
+        synthetic_strtab_data,
+        total_symbols ) =
+    build_all_symbol_maps ~symtab_body ~strtab_body ~igot_and_iplt ~num_original
   in
   (* Rewrite all .rela.text* sections *)
   let rewritten_rela_sections =
@@ -458,11 +544,11 @@ let compute ~header ~sections ~symtab_body ~strtab_body ~rela_text_sections
   let iplt_name_offset = Strtab.add shstrtab iplt_name_str in
   let rela_iplt_name_str = rename_section ~partition_kind ".rela.text.iplt" in
   let rela_iplt_name_offset = Strtab.add shstrtab rela_iplt_name_str in
-  let num_original = Array.length sections in
-  let igot_idx = num_original in
-  let rela_igot_idx = num_original + 1 in
-  let iplt_idx = num_original + 2 in
-  let rela_iplt_idx = num_original + 3 in
+  let num_original_sections = Array.length sections in
+  let igot_idx = num_original_sections in
+  let rela_igot_idx = num_original_sections + 1 in
+  let iplt_idx = num_original_sections + 2 in
+  let rela_iplt_idx = num_original_sections + 3 in
   let find_section_by_type sh_type =
     let rec loop i =
       if i >= Array.length sections
@@ -496,27 +582,31 @@ let compute ~header ~sections ~symtab_body ~strtab_body ~rela_text_sections
   let new_symtab_shndx_idx, symtab_shndx_name_offset, num_sections =
     if need_new_symtab_shndx
     then
-      let idx = num_original + 4 in
+      let idx = num_original_sections + 4 in
       let name_offset = Strtab.add shstrtab ".symtab_shndx" in
-      Some idx, Some name_offset, num_original + 5
-    else None, None, num_original + 4
+      Some idx, Some name_offset, num_original_sections + 5
+    else None, None, num_original_sections + 4
   in
   let original_data_end =
     Array.fold_left
       (fun acc (s : Elf.section) -> max acc (Int64.add s.sh_offset s.sh_size))
       0L sections
   in
+  (* strtab size = original strtab + synthetic names appended to it *)
+  let strtab_size = Buf.size strtab_body + Bytes.length synthetic_strtab_data in
   let layout =
     compute_file_layout ~original_data_end ~igot_and_iplt ~total_symbols
-      ~strtab_size:(Strtab.length strtab)
-      ~shstrtab_size:(Strtab.length shstrtab) ~num_sections
+      ~strtab_size ~shstrtab_size:(Strtab.length shstrtab) ~num_sections
       ~shentsize:header.Elf.e_shentsize ~has_symtab_shndx:needs_symtab_shndx
   in
-  { original_symbols;
-    symbol_to_index;
+  { num_original_symbols = num_original;
+    igot_st_names;
+    iplt_st_names;
+    synthetic_strtab_data;
+    igot_orig_sym_indices;
+    iplt_igot_sym_indices;
     total_symbols;
     rewritten_rela_sections;
-    strtab;
     shstrtab;
     section_name_offsets;
     igot_name_offset;

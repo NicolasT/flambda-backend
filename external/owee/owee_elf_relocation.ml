@@ -214,9 +214,12 @@ let read_symbol_shndx ~symtab_body ~sym_index =
       (Bigarray.Array1.unsafe_get symtab_body p lor
        (Bigarray.Array1.unsafe_get symtab_body (p + 1) lsl 8)))
 
-(* Construct r_info from symbol index and relocation type *)
+(* Construct r_info from symbol index and relocation type.
+   Safe on 64-bit platforms (required by the dissector) where OCaml int is 63
+   bits: sym is a 32-bit ELF symbol index so sym < 2^30 in practice, meaning
+   sym lsl 32 < 2^62 < max_int. Saves three int64 allocations vs naive. *)
 let make_r_info ~sym ~typ =
-  Int64.logor (Int64.shift_left (Int64.of_int sym) 32) (Int64.of_int typ)
+  Int64.of_int ((sym lsl 32) lor typ)
 
 let write_rela_entry ~cursor entry =
   Owee_buf.Write.u64 cursor entry.r_offset;
