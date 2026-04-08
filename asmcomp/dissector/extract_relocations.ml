@@ -205,8 +205,14 @@ let extract unix ~filename =
   finalize (extract_into_accumulator unix ~filename empty_accumulator)
 
 let extract_from_linked_partitions unix linked_partitions =
-  List.map
-    (fun linked ->
-      let t = extract unix ~filename:(Partition.Linked.linked_object linked) in
-      linked, t)
-    linked_partitions
+  let acc =
+    List.map
+      (fun linked ->
+        let t =
+          extract unix ~filename:(Partition.Linked.linked_object linked)
+        in
+        linked, t)
+      linked_partitions
+  in
+  Dissector_gc.compact_phase "extract";
+  acc

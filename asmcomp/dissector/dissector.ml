@@ -222,6 +222,7 @@ let run ~(unix : (module Compiler_owee.Unix_intf.S)) ~temp_dir ~ml_objfiles
     end
     else None
   in
+  Dissector_gc.compact_phase "rewrite";
   { Result.linked_partitions;
     passthrough_files;
     linker_script;
