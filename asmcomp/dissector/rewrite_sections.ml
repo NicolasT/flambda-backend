@@ -67,291 +67,294 @@ let write_synthetic_symbol ~cursor ~st_name ~section_index ~offset ~size
 
 let execute_plan unix ~input_buf ~output_file ~header ~sections
     ~shstrtab_section ~igot_and_iplt ~symtab_body ~strtab_body ~plan =
-  let module Unix = (val unix : Compiler_owee.Unix_intf.S) in
   let module SL = FRP.Section_layout in
   let module L = FRP.Layout in
   let layout = FRP.layout plan in
-  let output_buf =
-    Buf.map_binary_write
-      (module Unix)
-      output_file
-      (int64_to_int (L.total_size layout))
-  in
   let original_size = int64_to_int (FRP.original_data_end plan) in
-  (* Use Bigarray.Array1.blit for efficient bulk copy (memcpy internally) *)
-  Bigarray.Array1.blit
-    (Bigarray.Array1.sub input_buf 0 original_size)
-    (Bigarray.Array1.sub output_buf 0 original_size);
-  let igot_layout = L.igot layout in
-  let rela_igot_layout = L.rela_igot layout in
-  let iplt_layout = L.iplt layout in
-  let rela_iplt_layout = L.rela_iplt layout in
-  let symtab_layout = L.symtab layout in
-  let strtab_layout = L.strtab layout in
-  let shstrtab_layout = L.shstrtab layout in
-  let igot = Build_igot_and_iplt.igot igot_and_iplt in
-  let iplt = Build_igot_and_iplt.iplt igot_and_iplt in
-  Buf.Write.fixed_bytes
-    (Buf.cursor output_buf ~at:(int64_to_int (SL.offset igot_layout)))
-    (int64_to_int (SL.size igot_layout))
-    (Igot.section_data igot);
-  let cursor =
-    Buf.cursor output_buf ~at:(int64_to_int (SL.offset rela_igot_layout))
-  in
-  let igot_orig_sym_indices = FRP.igot_orig_sym_indices plan in
-  List.iteri
-    (fun i entry ->
-      Rela.write_rela_entry ~cursor
-        { r_offset = Int64.of_int (Igot.Entry.offset entry);
-          r_sym = igot_orig_sym_indices.(i);
-          r_type = Rela.Reloc_type.r64;
-          r_addend = 0L
-        })
-    (Igot.entries igot);
-  Buf.Write.fixed_bytes
-    (Buf.cursor output_buf ~at:(int64_to_int (SL.offset iplt_layout)))
-    (int64_to_int (SL.size iplt_layout))
-    (Iplt.section_data iplt);
-  let cursor =
-    Buf.cursor output_buf ~at:(int64_to_int (SL.offset rela_iplt_layout))
-  in
-  let iplt_igot_sym_indices = FRP.iplt_igot_sym_indices plan in
-  List.iteri
-    (fun j entry ->
-      Rela.write_rela_entry ~cursor
-        { r_offset =
-            Int64.of_int (Iplt.Entry.offset entry + Iplt.displacement_offset);
-          r_sym = iplt_igot_sym_indices.(j);
-          r_type = Rela.Reloc_type.pc32;
-          r_addend = -4L
-        })
-    (Iplt.entries iplt);
-  let cursor =
-    Buf.cursor output_buf ~at:(int64_to_int (SL.offset symtab_layout))
-  in
-  (* Bulk-copy original symbols from input: one blit instead of N per-symbol
-     write_sym_entry calls with record allocations. Since we bulk-copy the
-     original strtab verbatim, all st_name offsets remain valid. *)
-  let num_original = FRP.num_original_symbols plan in
-  let symtab_original_size = num_original * Rela.sym_entry_size in
-  Bigarray.Array1.blit
-    (Bigarray.Array1.sub symtab_body 0 symtab_original_size)
-    (Bigarray.Array1.sub cursor.Buf.buffer cursor.Buf.position
-       symtab_original_size);
-  Buf.advance cursor symtab_original_size;
-  let igot_st_names = FRP.igot_st_names plan in
-  List.iteri
-    (fun i entry ->
-      write_synthetic_symbol ~cursor ~st_name:igot_st_names.(i)
-        ~section_index:(FRP.igot_idx plan) ~offset:(Igot.Entry.offset entry)
-        ~size:Igot.entry_size ~is_func:false)
-    (Igot.entries igot);
-  let iplt_st_names = FRP.iplt_st_names plan in
-  List.iteri
-    (fun i entry ->
-      write_synthetic_symbol ~cursor ~st_name:iplt_st_names.(i)
-        ~section_index:(FRP.iplt_idx plan) ~offset:(Iplt.Entry.offset entry)
-        ~size:Iplt.entry_size ~is_func:true)
-    (Iplt.entries iplt);
-  (* Bulk-copy original strtab, then append synthetic names. *)
-  let strtab_offset = int64_to_int (SL.offset strtab_layout) in
-  let original_strtab_size = Buf.size strtab_body in
-  Bigarray.Array1.blit
-    (Bigarray.Array1.sub strtab_body 0 original_strtab_size)
-    (Bigarray.Array1.sub output_buf strtab_offset original_strtab_size);
-  let synthetic_strtab = FRP.synthetic_strtab_data plan in
-  let synthetic_len = Bytes.length synthetic_strtab in
-  if synthetic_len > 0
-  then
-    Buf.Write.fixed_bytes
-      (Buf.cursor output_buf ~at:(strtab_offset + original_strtab_size))
-      synthetic_len synthetic_strtab;
-  (* Write extended SYMTAB_SHNDX section if needed. This section must have the
-     same number of entries as the symbol table.
-
-     For symbols with st_shndx < SHN_LORESERVE, the SYMTAB_SHNDX entry is 0. For
-     symbols with st_shndx = SHN_XINDEX, the SYMTAB_SHNDX entry contains the
-     actual section index. *)
-  (match FRP.symtab_shndx_idx plan, L.symtab_shndx layout with
-  | _, Some symtab_shndx_layout ->
-    let cursor =
-      Buf.cursor output_buf ~at:(int64_to_int (SL.offset symtab_shndx_layout))
-    in
-    (* Helper to write a 32-bit little-endian value *)
-    let write_u32_le cursor value =
-      Buf.Write.u8 cursor (value land 0xff);
-      Buf.Write.u8 cursor ((value lsr 8) land 0xff);
-      Buf.Write.u8 cursor ((value lsr 16) land 0xff);
-      Buf.Write.u8 cursor ((value lsr 24) land 0xff)
-    in
-    (* Copy original entries if input has SYMTAB_SHNDX, else write zeros *)
-    (match FRP.symtab_shndx_idx plan with
-    | Some symtab_shndx_idx ->
-      let original_symtab_shndx_section = sections.(symtab_shndx_idx) in
-      let original_symtab_shndx_body =
-        Elf.section_body input_buf original_symtab_shndx_section
-      in
-      let original_size = Buf.size original_symtab_shndx_body in
-      Bigarray.Array1.blit original_symtab_shndx_body
-        (Bigarray.Array1.sub cursor.Buf.buffer cursor.Buf.position original_size);
-      Buf.advance cursor original_size
-    | None ->
-      (* Input doesn't have SYMTAB_SHNDX; write zeros for all original symbols
-         (they all have st_shndx < SHN_LORESERVE) *)
-      let zero_size = FRP.num_original_symbols plan * 4 in
-      Bigarray.Array1.fill
-        (Bigarray.Array1.sub cursor.Buf.buffer cursor.Buf.position zero_size)
-        0;
-      Buf.advance cursor zero_size);
-    (* Write extended section indices for IGOT symbols *)
-    let igot_idx = FRP.igot_idx plan in
-    let igot_shndx_entry =
-      if Rela.Section_index.(needs_extended (of_int igot_idx))
-      then igot_idx
-      else 0
-    in
-    List.iter
-      (fun _ -> write_u32_le cursor igot_shndx_entry)
-      (Igot.entries igot);
-    (* Write extended section indices for IPLT symbols *)
-    let iplt_idx = FRP.iplt_idx plan in
-    let iplt_shndx_entry =
-      if Rela.Section_index.(needs_extended (of_int iplt_idx))
-      then iplt_idx
-      else 0
-    in
-    List.iter
-      (fun _ -> write_u32_le cursor iplt_shndx_entry)
-      (Iplt.entries iplt)
-  | None, None -> ()
-  | Some _, None ->
-    Misc.fatal_error "SYMTAB_SHNDX in input but no layout allocated");
-  (* Write rewritten .rela.text* sections back to their original locations *)
-  List.iter
-    (fun rewritten_section ->
+  Buf.with_map_binary_write unix output_file
+    (int64_to_int (L.total_size layout))
+    (fun output_buf ->
+      (* Use Bigarray.Array1.blit for efficient bulk copy (memcpy internally) *)
+      Bigarray.Array1.blit
+        (Bigarray.Array1.sub input_buf 0 original_size)
+        (Bigarray.Array1.sub output_buf 0 original_size);
+      let igot_layout = L.igot layout in
+      let rela_igot_layout = L.rela_igot layout in
+      let iplt_layout = L.iplt layout in
+      let rela_iplt_layout = L.rela_iplt layout in
+      let symtab_layout = L.symtab layout in
+      let strtab_layout = L.strtab layout in
+      let shstrtab_layout = L.shstrtab layout in
+      let igot = Build_igot_and_iplt.igot igot_and_iplt in
+      let iplt = Build_igot_and_iplt.iplt igot_and_iplt in
+      Buf.Write.fixed_bytes
+        (Buf.cursor output_buf ~at:(int64_to_int (SL.offset igot_layout)))
+        (int64_to_int (SL.size igot_layout))
+        (Igot.section_data igot);
       let cursor =
-        Buf.cursor output_buf
-          ~at:
-            (int64_to_int
-               (FRP.Rewritten_rela_section.section_offset rewritten_section))
+        Buf.cursor output_buf ~at:(int64_to_int (SL.offset rela_igot_layout))
       in
-      Array.iter
-        (fun e -> Rela.write_rela_entry ~cursor e)
-        (FRP.Rewritten_rela_section.entries rewritten_section))
-    (FRP.rewritten_rela_sections plan);
-  Buf.Write.fixed_bytes
-    (Buf.cursor output_buf ~at:(int64_to_int (SL.offset shstrtab_layout)))
-    (int64_to_int (SL.size shstrtab_layout))
-    (Strtab.contents (FRP.shstrtab plan));
-  let relocate_section (s : Elf.section) layout : Elf.section =
-    { s with sh_offset = SL.offset layout; sh_size = SL.size layout }
-  in
-  (* Update sh_name to point to the (possibly renamed) section name in shstrtab,
-     and also update sh_name_str so owee writes the correct name *)
-  let section_name_offsets = FRP.section_name_offsets plan in
-  let rename_section (s : Elf.section) : Elf.section =
-    match String.Tbl.find_opt section_name_offsets s.sh_name_str with
-    | Some (new_name_offset, renamed_str) ->
-      { s with sh_name = new_name_offset; sh_name_str = renamed_str }
-    | None -> s
-  in
-  let symtab_shndx_layout_opt = L.symtab_shndx layout in
-  let update_section (s : Elf.section) =
-    let s = rename_section s in
-    match s.sh_name_str with
-    | ".symtab" -> relocate_section s symtab_layout
-    | ".strtab" -> relocate_section s strtab_layout
-    | ".symtab_shndx" -> (
-      match symtab_shndx_layout_opt with
-      | Some symtab_shndx_layout -> relocate_section s symtab_shndx_layout
-      | None -> s)
-    (* .rela.text* sections are rewritten in place, so no relocation needed *)
-    | _ -> s
-  in
-  let num_sections = FRP.num_sections plan in
-  let igot_idx = FRP.igot_idx plan in
-  let rela_igot_idx = FRP.rela_igot_idx plan in
-  let iplt_idx = FRP.iplt_idx plan in
-  let rela_iplt_idx = FRP.rela_iplt_idx plan in
-  let symtab_idx = FRP.symtab_idx plan in
-  (* Build new section headers *)
-  let igot_section =
-    Elf.make_progbits_section
-      ~sh_name:(FRP.igot_name_offset plan)
-      ~sh_name_str:(FRP.igot_name_str plan)
-      ~sh_flags:Elf.Section_flags.(to_u64 (shf_write + shf_alloc))
-      ~sh_offset:(SL.offset igot_layout) ~sh_size:(SL.size igot_layout)
-      ~sh_addralign:16L
-  in
-  let rela_igot_section =
-    Elf.make_rela_section
-      ~sh_name:(FRP.rela_igot_name_offset plan)
-      ~sh_name_str:(FRP.rela_igot_name_str plan)
-      ~sh_offset:(SL.offset rela_igot_layout)
-      ~sh_size:(SL.size rela_igot_layout) ~sh_link:symtab_idx ~sh_info:igot_idx
-  in
-  let iplt_section =
-    Elf.make_progbits_section
-      ~sh_name:(FRP.iplt_name_offset plan)
-      ~sh_name_str:(FRP.iplt_name_str plan)
-      ~sh_flags:Elf.Section_flags.(to_u64 (shf_execinstr + shf_alloc))
-      ~sh_offset:(SL.offset iplt_layout) ~sh_size:(SL.size iplt_layout)
-      ~sh_addralign:16L
-  in
-  let rela_iplt_section =
-    Elf.make_rela_section
-      ~sh_name:(FRP.rela_iplt_name_offset plan)
-      ~sh_name_str:(FRP.rela_iplt_name_str plan)
-      ~sh_offset:(SL.offset rela_iplt_layout)
-      ~sh_size:(SL.size rela_iplt_layout) ~sh_link:symtab_idx ~sh_info:iplt_idx
-  in
-  let new_symtab_shndx_section =
-    match
-      ( FRP.new_symtab_shndx_idx plan,
-        FRP.symtab_shndx_name_offset plan,
-        symtab_shndx_layout_opt )
-    with
-    | Some new_idx, Some name_offset, Some symtab_shndx_layout ->
-      let section =
-        Elf.make_symtab_shndx_section ~sh_name:name_offset
-          ~sh_name_str:".symtab_shndx"
-          ~sh_offset:(SL.offset symtab_shndx_layout)
-          ~sh_size:(SL.size symtab_shndx_layout)
-          ~sh_link:symtab_idx
+      let igot_orig_sym_indices = FRP.igot_orig_sym_indices plan in
+      List.iteri
+        (fun i entry ->
+          Rela.write_rela_entry ~cursor
+            { r_offset = Int64.of_int (Igot.Entry.offset entry);
+              r_sym = igot_orig_sym_indices.(i);
+              r_type = Rela.Reloc_type.r64;
+              r_addend = 0L
+            })
+        (Igot.entries igot);
+      Buf.Write.fixed_bytes
+        (Buf.cursor output_buf ~at:(int64_to_int (SL.offset iplt_layout)))
+        (int64_to_int (SL.size iplt_layout))
+        (Iplt.section_data iplt);
+      let cursor =
+        Buf.cursor output_buf ~at:(int64_to_int (SL.offset rela_iplt_layout))
       in
-      Some (new_idx, section)
-    | None, None, _ -> None
-    | _ -> Misc.fatal_error "Inconsistent new SYMTAB_SHNDX state"
-  in
-  (* Build section array: copy original sections with updates, then add new *)
-  let new_sections = Array.make num_sections sections.(0) in
-  Array.iteri (fun i s -> new_sections.(i) <- update_section s) sections;
-  new_sections.(igot_idx) <- igot_section;
-  new_sections.(rela_igot_idx) <- rela_igot_section;
-  new_sections.(iplt_idx) <- iplt_section;
-  new_sections.(rela_iplt_idx) <- rela_iplt_section;
-  Option.iter
-    (fun (idx, section) -> new_sections.(idx) <- section)
-    new_symtab_shndx_section;
-  (* Update shstrtab section with new offset and size. We use the already-
-     updated section (which has renamed sh_name and sh_name_str from
-     update_section) and just fix up the offset and size. *)
-  let shstrtab_idx = header.Elf.e_shstrndx in
-  let updated_shstrtab = new_sections.(shstrtab_idx) in
-  new_sections.(shstrtab_idx)
-    <- ({ updated_shstrtab with
-          sh_offset = SL.offset shstrtab_layout;
-          sh_size = SL.size shstrtab_layout
+      let iplt_igot_sym_indices = FRP.iplt_igot_sym_indices plan in
+      List.iteri
+        (fun j entry ->
+          Rela.write_rela_entry ~cursor
+            { r_offset =
+                Int64.of_int (Iplt.Entry.offset entry + Iplt.displacement_offset);
+              r_sym = iplt_igot_sym_indices.(j);
+              r_type = Rela.Reloc_type.pc32;
+              r_addend = -4L
+            })
+        (Iplt.entries iplt);
+      let cursor =
+        Buf.cursor output_buf ~at:(int64_to_int (SL.offset symtab_layout))
+      in
+      (* Bulk-copy original symbols from input: one blit instead of N per-symbol
+         write_sym_entry calls with record allocations. Since we bulk-copy the
+         original strtab verbatim, all st_name offsets remain valid. *)
+      let num_original = FRP.num_original_symbols plan in
+      let symtab_original_size = num_original * Rela.sym_entry_size in
+      Bigarray.Array1.blit
+        (Bigarray.Array1.sub symtab_body 0 symtab_original_size)
+        (Bigarray.Array1.sub cursor.Buf.buffer cursor.Buf.position
+           symtab_original_size);
+      Buf.advance cursor symtab_original_size;
+      let igot_st_names = FRP.igot_st_names plan in
+      List.iteri
+        (fun i entry ->
+          write_synthetic_symbol ~cursor ~st_name:igot_st_names.(i)
+            ~section_index:(FRP.igot_idx plan) ~offset:(Igot.Entry.offset entry)
+            ~size:Igot.entry_size ~is_func:false)
+        (Igot.entries igot);
+      let iplt_st_names = FRP.iplt_st_names plan in
+      List.iteri
+        (fun i entry ->
+          write_synthetic_symbol ~cursor ~st_name:iplt_st_names.(i)
+            ~section_index:(FRP.iplt_idx plan) ~offset:(Iplt.Entry.offset entry)
+            ~size:Iplt.entry_size ~is_func:true)
+        (Iplt.entries iplt);
+      (* Bulk-copy original strtab, then append synthetic names. *)
+      let strtab_offset = int64_to_int (SL.offset strtab_layout) in
+      let original_strtab_size = Buf.size strtab_body in
+      Bigarray.Array1.blit
+        (Bigarray.Array1.sub strtab_body 0 original_strtab_size)
+        (Bigarray.Array1.sub output_buf strtab_offset original_strtab_size);
+      let synthetic_strtab = FRP.synthetic_strtab_data plan in
+      let synthetic_len = Bytes.length synthetic_strtab in
+      if synthetic_len > 0
+      then
+        Buf.Write.fixed_bytes
+          (Buf.cursor output_buf ~at:(strtab_offset + original_strtab_size))
+          synthetic_len synthetic_strtab;
+      (* Write extended SYMTAB_SHNDX section if needed. This section must have
+         the same number of entries as the symbol table.
+
+         For symbols with st_shndx < SHN_LORESERVE, the SYMTAB_SHNDX entry is 0.
+         For symbols with st_shndx = SHN_XINDEX, the SYMTAB_SHNDX entry contains
+         the actual section index. *)
+      (match FRP.symtab_shndx_idx plan, L.symtab_shndx layout with
+      | _, Some symtab_shndx_layout ->
+        let cursor =
+          Buf.cursor output_buf
+            ~at:(int64_to_int (SL.offset symtab_shndx_layout))
+        in
+        (* Helper to write a 32-bit little-endian value *)
+        let write_u32_le cursor value =
+          Buf.Write.u8 cursor (value land 0xff);
+          Buf.Write.u8 cursor ((value lsr 8) land 0xff);
+          Buf.Write.u8 cursor ((value lsr 16) land 0xff);
+          Buf.Write.u8 cursor ((value lsr 24) land 0xff)
+        in
+        (* Copy original entries if input has SYMTAB_SHNDX, else write zeros *)
+        (match FRP.symtab_shndx_idx plan with
+        | Some symtab_shndx_idx ->
+          let original_symtab_shndx_section = sections.(symtab_shndx_idx) in
+          let original_symtab_shndx_body =
+            Elf.section_body input_buf original_symtab_shndx_section
+          in
+          let original_size = Buf.size original_symtab_shndx_body in
+          Bigarray.Array1.blit original_symtab_shndx_body
+            (Bigarray.Array1.sub cursor.Buf.buffer cursor.Buf.position
+               original_size);
+          Buf.advance cursor original_size
+        | None ->
+          (* Input doesn't have SYMTAB_SHNDX; write zeros for all original
+             symbols (they all have st_shndx < SHN_LORESERVE) *)
+          let zero_size = FRP.num_original_symbols plan * 4 in
+          Bigarray.Array1.fill
+            (Bigarray.Array1.sub cursor.Buf.buffer cursor.Buf.position zero_size)
+            0;
+          Buf.advance cursor zero_size);
+        (* Write extended section indices for IGOT symbols *)
+        let igot_idx = FRP.igot_idx plan in
+        let igot_shndx_entry =
+          if Rela.Section_index.(needs_extended (of_int igot_idx))
+          then igot_idx
+          else 0
+        in
+        List.iter
+          (fun _ -> write_u32_le cursor igot_shndx_entry)
+          (Igot.entries igot);
+        (* Write extended section indices for IPLT symbols *)
+        let iplt_idx = FRP.iplt_idx plan in
+        let iplt_shndx_entry =
+          if Rela.Section_index.(needs_extended (of_int iplt_idx))
+          then iplt_idx
+          else 0
+        in
+        List.iter
+          (fun _ -> write_u32_le cursor iplt_shndx_entry)
+          (Iplt.entries iplt)
+      | None, None -> ()
+      | Some _, None ->
+        Misc.fatal_error "SYMTAB_SHNDX in input but no layout allocated");
+      (* Write rewritten .rela.text* sections back to their original
+         locations *)
+      List.iter
+        (fun rewritten_section ->
+          let cursor =
+            Buf.cursor output_buf
+              ~at:
+                (int64_to_int
+                   (FRP.Rewritten_rela_section.section_offset rewritten_section))
+          in
+          Array.iter
+            (fun e -> Rela.write_rela_entry ~cursor e)
+            (FRP.Rewritten_rela_section.entries rewritten_section))
+        (FRP.rewritten_rela_sections plan);
+      Buf.Write.fixed_bytes
+        (Buf.cursor output_buf ~at:(int64_to_int (SL.offset shstrtab_layout)))
+        (int64_to_int (SL.size shstrtab_layout))
+        (Strtab.contents (FRP.shstrtab plan));
+      let relocate_section (s : Elf.section) layout : Elf.section =
+        { s with sh_offset = SL.offset layout; sh_size = SL.size layout }
+      in
+      (* Update sh_name to point to the (possibly renamed) section name in
+         shstrtab, and also update sh_name_str so owee writes the correct
+         name *)
+      let section_name_offsets = FRP.section_name_offsets plan in
+      let rename_section (s : Elf.section) : Elf.section =
+        match String.Tbl.find_opt section_name_offsets s.sh_name_str with
+        | Some (new_name_offset, renamed_str) ->
+          { s with sh_name = new_name_offset; sh_name_str = renamed_str }
+        | None -> s
+      in
+      let symtab_shndx_layout_opt = L.symtab_shndx layout in
+      let update_section (s : Elf.section) =
+        let s = rename_section s in
+        match s.sh_name_str with
+        | ".symtab" -> relocate_section s symtab_layout
+        | ".strtab" -> relocate_section s strtab_layout
+        | ".symtab_shndx" -> (
+          match symtab_shndx_layout_opt with
+          | Some symtab_shndx_layout -> relocate_section s symtab_shndx_layout
+          | None -> s)
+        (* .rela.text* sections are rewritten in place, so no relocation
+           needed *)
+        | _ -> s
+      in
+      let num_sections = FRP.num_sections plan in
+      let igot_idx = FRP.igot_idx plan in
+      let rela_igot_idx = FRP.rela_igot_idx plan in
+      let iplt_idx = FRP.iplt_idx plan in
+      let rela_iplt_idx = FRP.rela_iplt_idx plan in
+      let symtab_idx = FRP.symtab_idx plan in
+      (* Build new section headers *)
+      let igot_section =
+        Elf.make_progbits_section
+          ~sh_name:(FRP.igot_name_offset plan)
+          ~sh_name_str:(FRP.igot_name_str plan)
+          ~sh_flags:Elf.Section_flags.(to_u64 (shf_write + shf_alloc))
+          ~sh_offset:(SL.offset igot_layout) ~sh_size:(SL.size igot_layout)
+          ~sh_addralign:16L
+      in
+      let rela_igot_section =
+        Elf.make_rela_section
+          ~sh_name:(FRP.rela_igot_name_offset plan)
+          ~sh_name_str:(FRP.rela_igot_name_str plan)
+          ~sh_offset:(SL.offset rela_igot_layout)
+          ~sh_size:(SL.size rela_igot_layout) ~sh_link:symtab_idx
+          ~sh_info:igot_idx
+      in
+      let iplt_section =
+        Elf.make_progbits_section
+          ~sh_name:(FRP.iplt_name_offset plan)
+          ~sh_name_str:(FRP.iplt_name_str plan)
+          ~sh_flags:Elf.Section_flags.(to_u64 (shf_execinstr + shf_alloc))
+          ~sh_offset:(SL.offset iplt_layout) ~sh_size:(SL.size iplt_layout)
+          ~sh_addralign:16L
+      in
+      let rela_iplt_section =
+        Elf.make_rela_section
+          ~sh_name:(FRP.rela_iplt_name_offset plan)
+          ~sh_name_str:(FRP.rela_iplt_name_str plan)
+          ~sh_offset:(SL.offset rela_iplt_layout)
+          ~sh_size:(SL.size rela_iplt_layout) ~sh_link:symtab_idx
+          ~sh_info:iplt_idx
+      in
+      let new_symtab_shndx_section =
+        match
+          ( FRP.new_symtab_shndx_idx plan,
+            FRP.symtab_shndx_name_offset plan,
+            symtab_shndx_layout_opt )
+        with
+        | Some new_idx, Some name_offset, Some symtab_shndx_layout ->
+          let section =
+            Elf.make_symtab_shndx_section ~sh_name:name_offset
+              ~sh_name_str:".symtab_shndx"
+              ~sh_offset:(SL.offset symtab_shndx_layout)
+              ~sh_size:(SL.size symtab_shndx_layout)
+              ~sh_link:symtab_idx
+          in
+          Some (new_idx, section)
+        | None, None, _ -> None
+        | _ -> Misc.fatal_error "Inconsistent new SYMTAB_SHNDX state"
+      in
+      (* Build section array: copy original sections with updates, then add
+         new *)
+      let new_sections = Array.make num_sections sections.(0) in
+      Array.iteri (fun i s -> new_sections.(i) <- update_section s) sections;
+      new_sections.(igot_idx) <- igot_section;
+      new_sections.(rela_igot_idx) <- rela_igot_section;
+      new_sections.(iplt_idx) <- iplt_section;
+      new_sections.(rela_iplt_idx) <- rela_iplt_section;
+      Option.iter
+        (fun (idx, section) -> new_sections.(idx) <- section)
+        new_symtab_shndx_section;
+      (* Update shstrtab section with new offset and size. We use the already-
+         updated section (which has renamed sh_name and sh_name_str from
+         update_section) and just fix up the offset and size. *)
+      let shstrtab_idx = header.Elf.e_shstrndx in
+      let updated_shstrtab = new_sections.(shstrtab_idx) in
+      new_sections.(shstrtab_idx)
+        <- ({ updated_shstrtab with
+              sh_offset = SL.offset shstrtab_layout;
+              sh_size = SL.size shstrtab_layout
+            }
+             : Elf.section);
+      let new_header : Elf.header =
+        { header with
+          e_shoff = L.section_headers_offset layout;
+          e_shnum = num_sections
         }
-         : Elf.section);
-  let new_header : Elf.header =
-    { header with
-      e_shoff = L.section_headers_offset layout;
-      e_shnum = num_sections
-    }
-  in
-  Elf.write_elf output_buf new_header new_sections;
-  Buf.unmap output_buf
+      in
+      Elf.write_elf output_buf new_header new_sections)
 
 (* Find all sections with names starting with prefix *)
 let find_sections_with_prefix sections prefix =

@@ -11,6 +11,15 @@ val map_binary_write : (module Unix_intf.S) -> string -> int -> t
     non-mmap'd buffers. *)
 val unmap : t -> unit
 
+(** [with_map_binary unix path f] maps [path], calls [f buf], unmaps the buffer
+    (even if [f] raises), and returns the result of [f]. *)
+val with_map_binary : (module Unix_intf.S) -> string -> (t -> 'a) -> 'a
+
+(** [with_map_binary_write unix path size f] creates a writable mapping of
+    [size] bytes at [path], calls [f buf], unmaps the buffer (even if [f]
+    raises), and returns the result of [f]. *)
+val with_map_binary_write : (module Unix_intf.S) -> string -> int -> (t -> 'a) -> 'a
+
 (* Size of buffer remains int, because the size (aka dim) of
    Bigarray.Array1 is int, not int64. It should be enough in practice,
    as we will not be able to manipulate larger binaries anyway. *)

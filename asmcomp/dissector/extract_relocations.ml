@@ -218,12 +218,7 @@ let extract_from_buf ~buf ~sections =
   finalize (extract_from_buf_acc ~buf ~sections empty_accumulator)
 
 let extract unix ~filename =
-  let module Unix = (val unix : Compiler_owee.Unix_intf.S) in
   log_verbose "extracting relocations from %s" filename;
-  let buf = Compiler_owee.Owee_buf.map_binary (module Unix) filename in
-  let _header, sections = Elf.read_elf buf in
-  let result =
-    finalize (extract_from_buf_acc ~buf ~sections empty_accumulator)
-  in
-  Compiler_owee.Owee_buf.unmap buf;
-  result
+  Compiler_owee.Owee_buf.with_map_binary unix filename (fun buf ->
+      let _header, sections = Elf.read_elf buf in
+      finalize (extract_from_buf_acc ~buf ~sections empty_accumulator))

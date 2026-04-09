@@ -167,6 +167,14 @@ end
 
 external unmap : t -> unit = "owee_buf_unmap" [@@noalloc]
 
+let with_map_binary unix path f =
+  let buf = map_binary unix path in
+  Fun.protect ~finally:(fun () -> unmap buf) (fun () -> f buf)
+
+let with_map_binary_write unix path size f =
+  let buf = map_binary_write unix path size in
+  Fun.protect ~finally:(fun () -> unmap buf) (fun () -> f buf)
+
 external unsafe_blit_str
   :  src:string
   -> src_pos:int

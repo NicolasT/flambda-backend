@@ -182,26 +182,32 @@ let run ~(unix : (module Compiler_owee.Unix_intf.S)) ~temp_dir ~ml_objfiles
         let kind = Partition.kind (Partition.Linked.partition linked) in
         let prefix = Partition.symbol_prefix kind in
         let input_file = Partition.Linked.linked_object linked in
-        let input_buf = Buf.map_binary unix input_file in
-        let header, sections = Elf.read_elf input_buf in
-        let relocations =
-          Profile.record_call ~accumulate:true "dissector/extract_relocations"
-            (fun () ->
-              Extract_relocations.extract_from_buf ~buf:input_buf ~sections)
-        in
-        let n_plt = Extract_relocations.num_plt relocations in
-        let n_got = Extract_relocations.num_got relocations in
-        let igot_and_iplt = Build_igot_and_iplt.build ~prefix relocations in
-        log "built IGOT with %d entries, IPLT with %d entries (prefix=%s)"
-          (Igot.num_entries (Build_igot_and_iplt.igot igot_and_iplt))
-          (Iplt.num_entries (Build_igot_and_iplt.iplt igot_and_iplt))
-          prefix;
         let output_file = input_file ^ ".rewritten" in
-        Profile.record_call ~accumulate:true "dissector/rewrite" (fun () ->
-            Rewrite_sections.rewrite unix ~input_buf ~output_file ~header
-              ~sections ~partition_kind:kind ~igot_and_iplt);
-        log "rewrote %s -> %s" input_file output_file;
-        Buf.unmap input_buf;
+        let n_plt, n_got =
+          Buf.with_map_binary unix input_file (fun input_buf ->
+              let header, sections = Elf.read_elf input_buf in
+              let relocations =
+                Profile.record_call ~accumulate:true
+                  "dissector/extract_relocations" (fun () ->
+                    Extract_relocations.extract_from_buf ~buf:input_buf
+                      ~sections)
+              in
+              let n_plt = Extract_relocations.num_plt relocations in
+              let n_got = Extract_relocations.num_got relocations in
+              let igot_and_iplt =
+                Build_igot_and_iplt.build ~prefix relocations
+              in
+              log "built IGOT with %d entries, IPLT with %d entries (prefix=%s)"
+                (Igot.num_entries (Build_igot_and_iplt.igot igot_and_iplt))
+                (Iplt.num_entries (Build_igot_and_iplt.iplt igot_and_iplt))
+                prefix;
+              Profile.record_call ~accumulate:true "dissector/rewrite"
+                (fun () ->
+                  Rewrite_sections.rewrite unix ~input_buf ~output_file ~header
+                    ~sections ~partition_kind:kind ~igot_and_iplt);
+              log "rewrote %s -> %s" input_file output_file;
+              n_plt, n_got)
+        in
         Gc.full_major ();
         plt_acc + n_plt, got_acc + n_got)
       (0, 0) linked_partitions
