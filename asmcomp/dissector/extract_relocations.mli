@@ -60,9 +60,14 @@ val num_plt : t -> int
 (** Returns the number of GOT relocations (O(1)). *)
 val num_got : t -> int
 
-(** [extract unix ~filename] reads the ELF object file at [filename] and
-    extracts relocations from the .rela.text section that need to be converted
-    for the medium code model.
+(** [extract_from_buf ~buf ~sections] extracts relocations from an already
+    mmap'd ELF buffer with its pre-parsed section array. Does not mmap or unmap
+    [buf] — the caller owns the buffer lifetime. *)
+val extract_from_buf :
+  buf:Compiler_owee.Owee_buf.t ->
+  sections:Compiler_owee.Owee_elf.section array ->
+  t
 
-    Returns the lists of PLT32 and REX_GOTPCRELX relocations found. *)
+(** [extract unix ~filename] reads the ELF object file at [filename], extracts
+    relocations, and unmaps the file before returning. *)
 val extract : (module Compiler_owee.Unix_intf.S) -> filename:string -> t

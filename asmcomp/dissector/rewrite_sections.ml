@@ -362,10 +362,8 @@ let find_sections_with_prefix sections prefix =
       else acc)
     sections []
 
-let rewrite unix ~input_file ~output_file ~partition_kind ~igot_and_iplt =
-  let module Unix = (val unix : Compiler_owee.Unix_intf.S) in
-  let input_buf = Buf.map_binary (module Unix) input_file in
-  let header, sections = Elf.read_elf input_buf in
+let rewrite unix ~input_buf ~output_file ~header ~sections ~partition_kind
+    ~igot_and_iplt =
   let symtab_section =
     match
       Array.find_opt
@@ -376,12 +374,12 @@ let rewrite unix ~input_file ~output_file ~partition_kind ~igot_and_iplt =
     | Some s -> s
     | None -> Misc.fatal_error "rewrite_sections: no symbol table found"
   in
-  let strtab_section = sections.(symtab_section.sh_link) in
+  let strtab_section = sections.((symtab_section : Elf.section).sh_link) in
   (* Find all .rela.text* sections (handles function sections) *)
   let rela_text_section_list =
     find_sections_with_prefix sections ".rela.text"
   in
-  let shstrtab_section = sections.(header.e_shstrndx) in
+  let shstrtab_section = sections.(header.Elf.e_shstrndx) in
   let symtab_body = Elf.section_body input_buf symtab_section in
   let strtab_body = Elf.section_body input_buf strtab_section in
   (* Build list of (section, body) pairs *)
@@ -395,5 +393,4 @@ let rewrite unix ~input_file ~output_file ~partition_kind ~igot_and_iplt =
       ~partition_kind ~igot_and_iplt
   in
   execute_plan unix ~input_buf ~output_file ~header ~sections ~shstrtab_section
-    ~igot_and_iplt ~symtab_body ~strtab_body ~plan;
-  Buf.unmap input_buf
+    ~igot_and_iplt ~symtab_body ~strtab_body ~plan

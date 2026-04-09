@@ -28,6 +28,8 @@
 (* CR mshinwell: This file needs to be code reviewed *)
 
 module MOF = Measure_object_files
+module Buf = Compiler_owee.Owee_buf
+module Elf = Compiler_owee.Owee_elf
 
 type error =
   | Measure_error of MOF.error
@@ -167,18 +169,25 @@ let run ~(unix : (module Compiler_owee.Unix_intf.S)) ~temp_dir ~ml_objfiles
     with Partial_link.Error err -> raise (Error (Partial_link_error err))
   in
   log "partially linked %d partition(s)" (List.length linked_partitions);
-  (* Extract relocations and rewrite each partition immediately, so each
-     partition's Extract_relocations.t is freed before the next begins rather
-     than accumulating all of them simultaneously. *)
+  (* Extract relocations and rewrite each partition immediately, then run a full
+     major GC to collect the now-dead mmap'd bigarray custom blocks. Without the
+     GC, all partitions' bigarrays accumulate on the major heap until the
+     post-fold compact_phase, causing a memory peak proportional to the
+     aggregate size of all partition object files. The bigarrays are physically
+     unmapped eagerly by Buf.unmap, but OCaml's GC still tracks their custom
+     blocks until they are collected. *)
   let total_plt, total_got =
     List.fold_left
       (fun (plt_acc, got_acc) linked ->
         let kind = Partition.kind (Partition.Linked.partition linked) in
         let prefix = Partition.symbol_prefix kind in
         let input_file = Partition.Linked.linked_object linked in
+        let input_buf = Buf.map_binary unix input_file in
+        let header, sections = Elf.read_elf input_buf in
         let relocations =
           Profile.record_call ~accumulate:true "dissector/extract_relocations"
-            (fun () -> Extract_relocations.extract unix ~filename:input_file)
+            (fun () ->
+              Extract_relocations.extract_from_buf ~buf:input_buf ~sections)
         in
         let n_plt = Extract_relocations.num_plt relocations in
         let n_got = Extract_relocations.num_got relocations in
@@ -189,9 +198,11 @@ let run ~(unix : (module Compiler_owee.Unix_intf.S)) ~temp_dir ~ml_objfiles
           prefix;
         let output_file = input_file ^ ".rewritten" in
         Profile.record_call ~accumulate:true "dissector/rewrite" (fun () ->
-            Rewrite_sections.rewrite unix ~input_file ~output_file
-              ~partition_kind:kind ~igot_and_iplt);
+            Rewrite_sections.rewrite unix ~input_buf ~output_file ~header
+              ~sections ~partition_kind:kind ~igot_and_iplt);
         log "rewrote %s -> %s" input_file output_file;
+        Buf.unmap input_buf;
+        Gc.full_major ();
         plt_acc + n_plt, got_acc + n_got)
       (0, 0) linked_partitions
   in
