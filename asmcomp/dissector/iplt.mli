@@ -68,16 +68,12 @@ end
 (** A built intermediate PLT section. *)
 type t
 
-(** [build ~prefix ~igot symbols] builds an intermediate PLT from a list of
-    symbols that need PLT entries.
-
-    Each PLT entry requires a corresponding IGOT entry, which must exist in the
-    provided [igot].
+(** [build ~prefix symbols] builds an intermediate PLT from a list of symbols
+    that need PLT entries.
 
     @param prefix A unique prefix for this partition (e.g., "0", "1")
-    @param igot The intermediate GOT (must contain entries for all symbols)
     @param symbols List of original symbol names needing PLT entries *)
-val build : prefix:string -> igot:Igot.t -> symbols:string list -> t
+val build : prefix:string -> symbols:string list -> t
 
 (** Returns the list of entries in the IPLT. *)
 val entries : t -> Entry.t list
@@ -91,29 +87,9 @@ val section_data : t -> bytes
 (** Returns the size of the section in bytes. *)
 val section_size : t -> int
 
-(** [find_entry t ~symbol] returns the entry for [symbol], or [None] if not
-    found. *)
-val find_entry : t -> symbol:string -> Entry.t option
-
 (** [iplt_symbol_name ~prefix ~symbol] returns the IPLT symbol name for the
     given original symbol. *)
 val iplt_symbol_name : prefix:string -> symbol:string -> string
 
-(** A relocation for an IPLT entry. *)
-module Relocation : sig
-  type t
-
-  (** Returns the offset within the IPLT section (entry_offset + 2). *)
-  val offset : t -> int
-
-  (** Returns the IGOT symbol to relocate to. *)
-  val symbol : t -> string
-
-  (** Returns the relocation addend (-4 to account for RIP pointing past
-      displacement). *)
-  val addend : t -> int64
-end
-
-(** [relocations t] returns the list of R_X86_64_PC32 relocations needed to fill
-    the IPLT entries with displacements to their IGOT entries. *)
-val relocations : t -> Relocation.t list
+(** The displacement field offset within each IPLT entry. *)
+val displacement_offset : int

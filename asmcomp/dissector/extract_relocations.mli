@@ -60,10 +60,3 @@ val convert_to_got : t -> Relocation_entry.t list
 
     Returns the lists of PLT32 and REX_GOTPCRELX relocations found. *)
 val extract : (module Compiler_owee.Unix_intf.S) -> filename:string -> t
-
-(** [extract_from_linked_partitions unix linked_partitions] extracts relocations
-    from all the partially-linked object files.
-
-    Returns combined relocation information from all partitions. *)
-val extract_from_linked_partitions :
-  (module Compiler_owee.Unix_intf.S) -> Partition.Linked.t list -> t

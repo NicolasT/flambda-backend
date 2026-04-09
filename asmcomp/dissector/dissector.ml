@@ -163,27 +163,37 @@ let run ~(unix : (module Compiler_owee.Unix_intf.S)) ~temp_dir ~ml_objfiles
     with Partial_link.Error err -> raise (Error (Partial_link_error err))
   in
   log "partially linked %d partition(s)" (List.length linked_partitions);
-  let relocations =
-    Extract_relocations.extract_from_linked_partitions unix linked_partitions
+  (* Extract relocations and rewrite each partition immediately so each
+     partition's Extract_relocations.t is freed before the next begins, rather
+     than accumulating all simultaneously. *)
+  let total_igot, total_iplt =
+    List.fold_left
+      (fun (igot_acc, iplt_acc) linked ->
+        let kind = Partition.kind (Partition.Linked.partition linked) in
+        let prefix = Partition.symbol_prefix kind in
+        let input_file = Partition.Linked.linked_object linked in
+        let relocations =
+          Profile.record_call ~accumulate:true "dissector/extract_relocations"
+            (fun () -> Extract_relocations.extract unix ~filename:input_file)
+        in
+        let igot_and_iplt = Build_igot_and_iplt.build ~prefix relocations in
+        let n_igot =
+          Igot.num_entries (Build_igot_and_iplt.igot igot_and_iplt)
+        in
+        let n_iplt =
+          Iplt.num_entries (Build_igot_and_iplt.iplt igot_and_iplt)
+        in
+        log "built IGOT with %d entries, IPLT with %d entries (prefix=%s)"
+          n_igot n_iplt prefix;
+        let output_file = input_file ^ ".rewritten" in
+        Profile.record_call ~accumulate:true "dissector/rewrite" (fun () ->
+            Rewrite_sections.rewrite unix ~input_file ~output_file
+              ~partition_kind:kind ~igot_and_iplt);
+        log "rewrote %s -> %s" input_file output_file;
+        igot_acc + n_igot, iplt_acc + n_iplt)
+      (0, 0) linked_partitions
   in
-  log "found %d PLT relocations and %d GOT relocations"
-    (List.length (Extract_relocations.convert_to_plt relocations))
-    (List.length (Extract_relocations.convert_to_got relocations));
-  List.iter
-    (fun linked ->
-      let kind = Partition.kind (Partition.Linked.partition linked) in
-      let prefix = Partition.symbol_prefix kind in
-      let igot_and_iplt = Build_igot_and_iplt.build ~prefix relocations in
-      log "built IGOT with %d entries, IPLT with %d entries (prefix=%s)"
-        (List.length (Igot.entries (Build_igot_and_iplt.igot igot_and_iplt)))
-        (List.length (Iplt.entries (Build_igot_and_iplt.iplt igot_and_iplt)))
-        prefix;
-      let input_file = Partition.Linked.linked_object linked in
-      let output_file = input_file ^ ".rewritten" in
-      Rewrite_sections.rewrite unix ~input_file ~output_file
-        ~partition_kind:kind ~igot_and_iplt ~relocations;
-      log "rewrote %s -> %s" input_file output_file)
-    linked_partitions;
+  log "total: %d IGOT entries, %d IPLT entries" total_igot total_iplt;
   let existing_script = extract_linker_script_from_ccopts !Clflags.all_ccopts in
   (match existing_script with
   | Some path -> log "found existing linker script: %s" path

@@ -187,9 +187,12 @@ val symtab_shndx_name_offset : t -> int option
 (** Returns the layout of all sections in the output file. *)
 val layout : t -> Layout.t
 
+(** Returns the file offset of the end of the original section data. *)
+val original_data_end : t -> int64
+
 (** [compute ~header ~sections ~symtab_body ~strtab_body ~rela_text_sections
-     ~partition_kind ~igot_and_iplt ~relocations] analyzes the ELF structure and
-    builds a rewrite plan.
+     ~partition_kind ~igot_and_iplt] analyzes the ELF structure and builds a
+    rewrite plan.
 
     [rela_text_sections] is a list of (section, body) pairs for all .rela.text*
     sections in the input file. This handles both traditional single .rela.text
@@ -206,5 +209,4 @@ val compute :
     (Compiler_owee.Owee_elf.section * Compiler_owee.Owee_buf.t) list ->
   partition_kind:Partition.kind ->
   igot_and_iplt:Build_igot_and_iplt.t ->
-  relocations:Extract_relocations.t ->
   t

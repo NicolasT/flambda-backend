@@ -77,12 +77,7 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
       output_file
       (int64_to_int (L.total_size layout))
   in
-  let original_data_end =
-    Array.fold_left
-      (fun acc (s : Elf.section) -> max acc (Int64.add s.sh_offset s.sh_size))
-      0L sections
-  in
-  let original_size = int64_to_int original_data_end in
+  let original_size = int64_to_int (FRP.original_data_end plan) in
   (* Use Bigarray.Array1.blit for efficient bulk copy (memcpy internally) *)
   Bigarray.Array1.blit
     (Bigarray.Array1.sub input_buf 0 original_size)
@@ -105,14 +100,14 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
   in
   let igot_orig_sym_indices = FRP.igot_orig_sym_indices plan in
   List.iteri
-    (fun i r ->
+    (fun i entry ->
       Rela.write_rela_entry ~cursor
-        { r_offset = Int64.of_int (Igot.Relocation.offset r);
+        { r_offset = Int64.of_int (Igot.Entry.offset entry);
           r_sym = igot_orig_sym_indices.(i);
           r_type = Rela.Reloc_type.r64;
-          r_addend = Igot.Relocation.addend r
+          r_addend = 0L
         })
-    (Igot.relocations igot);
+    (Igot.entries igot);
   Buf.Write.fixed_bytes
     (Buf.cursor output_buf ~at:(int64_to_int (SL.offset iplt_layout)))
     (int64_to_int (SL.size iplt_layout))
@@ -122,14 +117,15 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
   in
   let iplt_igot_sym_indices = FRP.iplt_igot_sym_indices plan in
   List.iteri
-    (fun j r ->
+    (fun j entry ->
       Rela.write_rela_entry ~cursor
-        { r_offset = Int64.of_int (Iplt.Relocation.offset r);
+        { r_offset =
+            Int64.of_int (Iplt.Entry.offset entry + Iplt.displacement_offset);
           r_sym = iplt_igot_sym_indices.(j);
           r_type = Rela.Reloc_type.pc32;
-          r_addend = Iplt.Relocation.addend r
+          r_addend = -4L
         })
-    (Iplt.relocations iplt);
+    (Iplt.entries iplt);
   let cursor =
     Buf.cursor output_buf ~at:(int64_to_int (SL.offset symtab_layout))
   in
@@ -358,12 +354,14 @@ let execute_plan unix ~input_buf ~output_file ~header ~sections
 
 (* Find all sections with names starting with prefix *)
 let find_sections_with_prefix sections prefix =
-  Array.to_list sections
-  |> List.filter (fun (section : Elf.section) ->
-      String.starts_with ~prefix section.sh_name_str)
+  Array.fold_right
+    (fun (section : Elf.section) acc ->
+      if String.starts_with ~prefix section.sh_name_str
+      then section :: acc
+      else acc)
+    sections []
 
-let rewrite unix ~input_file ~output_file ~partition_kind ~igot_and_iplt
-    ~relocations =
+let rewrite unix ~input_file ~output_file ~partition_kind ~igot_and_iplt =
   let module Unix = (val unix : Compiler_owee.Unix_intf.S) in
   let input_buf = Buf.map_binary (module Unix) input_file in
   let header, sections = Elf.read_elf input_buf in
@@ -393,7 +391,7 @@ let rewrite unix ~input_file ~output_file ~partition_kind ~igot_and_iplt
   in
   let plan =
     FRP.compute ~header ~sections ~symtab_body ~strtab_body ~rela_text_sections
-      ~partition_kind ~igot_and_iplt ~relocations
+      ~partition_kind ~igot_and_iplt
   in
   execute_plan unix ~input_buf ~output_file ~header ~sections ~shstrtab_section
     ~igot_and_iplt ~symtab_body ~strtab_body ~plan

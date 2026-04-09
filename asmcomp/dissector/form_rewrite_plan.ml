@@ -135,7 +135,11 @@ type t =
     symtab_shndx_idx : int option;
     new_symtab_shndx_idx : int option;
     symtab_shndx_name_offset : int option;
-    layout : Layout.t
+    layout : Layout.t;
+    (* File offset of the end of the original section data — the point at which
+       new sections begin. Pre-computed and stored to avoid recomputing in
+       execute_plan. *)
+    original_data_end : int64
   }
 
 let num_original_symbols t = t.num_original_symbols
@@ -149,6 +153,8 @@ let synthetic_strtab_data t = t.synthetic_strtab_data
 let igot_orig_sym_indices t = t.igot_orig_sym_indices
 
 let iplt_igot_sym_indices t = t.iplt_igot_sym_indices
+
+let original_data_end t = t.original_data_end
 
 let total_symbols t = t.total_symbols
 
@@ -501,7 +507,7 @@ let rename_section ~(partition_kind : Partition.kind) name =
    sections in the input file. Each section's relocations will be rewritten to
    use the synthetic IGOT/IPLT symbols. *)
 let compute ~header ~sections ~symtab_body ~strtab_body ~rela_text_sections
-    ~partition_kind ~igot_and_iplt ~relocations:_ =
+    ~partition_kind ~igot_and_iplt =
   log_verbose "forming rewrite plan for partition %s"
     (Partition.symbol_prefix partition_kind);
   let num_original = Buf.size symtab_body / Rela.sym_entry_size in
@@ -626,5 +632,6 @@ let compute ~header ~sections ~symtab_body ~strtab_body ~rela_text_sections
     symtab_shndx_idx;
     new_symtab_shndx_idx;
     symtab_shndx_name_offset;
-    layout
+    layout;
+    original_data_end
   }
